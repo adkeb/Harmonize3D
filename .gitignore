@@ -1,0 +1,38 @@
+# Local Python / virtualenv state
+.venv/
+.venv-hy3d/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Large local model weights and generated artifacts
+models/*
+!models/.gitkeep
+outputs/
+renders/
+final/
+
+# Downloaded third-party repositories, binaries, and archives
+tools/*
+!tools/hfd.sh
+
+# Blender/cache/temp artifacts
+*.blend1
+*.blend2
+*.tmp
+*.log
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

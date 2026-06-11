@@ -1,0 +1,14 @@
+{
+  "prompt": "cyberpunk fox figurine, glossy enamel, studio product lighting",
+  "model_path": "models/example.glb",
+  "workdir": "outputs/example_run",
+  "backend": "mock",
+  "render": {
+    "resolution": 1024,
+    "views": 8
+  },
+  "ai": {
+    "candidates_per_view": 2,
+    "seed": 20260610
+  }
+}
