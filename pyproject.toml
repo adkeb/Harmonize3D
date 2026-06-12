@@ -32,3 +32,9 @@ local3dai-web = "local3dai.webapp:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-s"
+testpaths = ["tests"]
+pythonpath = ["src"]
+norecursedirs = ["tools", "models", "outputs", "docs", ".venv"]

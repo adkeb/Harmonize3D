@@ -3,158 +3,244 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Local3DAI Control</title>
+    <title>Harmonize3D Workbench</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three/three.module.js"
+        }
+      }
+    </script>
   </head>
   <body>
-    <main class="app-shell">
-      <section class="control-panel">
+    <main class="workbench">
+      <section class="panel control-panel">
         <div class="brand-row">
           <div>
-            <p class="eyebrow">Local3DAI</p>
-            <h1>3D 到约束渲染</h1>
+            <p class="eyebrow">Harmonize3D</p>
+            <h1>分阶段 3D AI 工作台</h1>
           </div>
-          <button id="refreshButton" class="icon-button" title="刷新状态" type="button">
+          <button id="refreshButton" class="icon-button" title="刷新配置" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M5.7 9A7 7 0 0 1 17.7 6L20 8.3"/><path d="M18.3 15A7 7 0 0 1 6.3 18L4 15.7"/></svg>
           </button>
         </div>
 
-        <form id="runForm" class="form-grid">
+        <section class="stage-block" data-stage-block="source">
+          <div class="stage-head">
+            <span class="step-index">1</span>
+            <div>
+              <h2>生成或载入 3D 白模</h2>
+              <p id="sourceStatus">等待输入</p>
+            </div>
+          </div>
+
           <label class="field">
             <span>来源</span>
             <select id="sourceMode">
-              <option value="existing_mesh">已有白模 GLB</option>
-              <option value="hunyuan_reference">参考图 + Hunyuan3D</option>
-              <option value="model_path">指定模型路径</option>
+              <option value="prompt_3d">提示词生成 3D</option>
+              <option value="image_3d">图片生成 3D</option>
+              <option value="model_path">已有模型路径</option>
               <option value="procedural">程序化测试模型</option>
             </select>
           </label>
 
-          <label class="field" data-mode-field="existing_mesh model_path">
-            <span>模型路径</span>
-            <input id="modelPath" type="text" value="/root/sakura/work/build/outputs/hunyuan_shape_sd_render/white_mesh.glb" />
+          <label class="field" data-mode-field="prompt_3d procedural">
+            <span>3D 来源提示词</span>
+            <textarea id="sourcePrompt" rows="4">high quality white sports car concept, clean side view, strong silhouette, centered product reference</textarea>
           </label>
 
-          <label class="field" data-mode-field="hunyuan_reference">
+          <label class="field" data-mode-field="image_3d">
             <span>参考图</span>
             <input id="referenceFile" type="file" accept="image/png,image/jpeg,image/webp" />
           </label>
 
-          <label class="field" data-mode-field="hunyuan_reference">
+          <label class="field" data-mode-field="image_3d">
             <span>或参考图路径</span>
             <input id="referencePath" type="text" placeholder="/root/.../reference.png" />
           </label>
 
-          <label class="field field-wide">
-            <span>正向提示</span>
-            <textarea id="prompt" rows="4"></textarea>
-          </label>
-
-          <label class="field field-wide">
-            <span>负向提示</span>
-            <textarea id="negativePrompt" rows="3"></textarea>
+          <label class="field" data-mode-field="model_path">
+            <span>模型路径</span>
+            <input id="modelPath" type="text" value="/root/sakura/work/Harmonize3D/examples/sample_model.obj" />
           </label>
 
           <div class="number-grid">
             <label class="field">
-              <span>白模分辨率</span>
-              <input id="renderResolution" type="number" min="512" max="2048" step="128" value="1536" />
-            </label>
-            <label class="field">
-              <span>AI 宽度</span>
-              <input id="aiWidth" type="number" min="512" max="2048" step="128" value="1536" />
-            </label>
-            <label class="field">
-              <span>AI 高度</span>
-              <input id="aiHeight" type="number" min="512" max="2048" step="128" value="1536" />
-            </label>
-            <label class="field">
-              <span>候选数</span>
-              <input id="candidates" type="number" min="1" max="8" step="1" value="1" />
-            </label>
-            <label class="field">
-              <span>步数</span>
-              <input id="steps" type="number" min="1" max="80" step="1" value="42" />
-            </label>
-            <label class="field">
               <span>Seed</span>
               <input id="seed" type="number" step="1" value="20260610" />
             </label>
+            <label class="field">
+              <span>3D 质量</span>
+              <select id="shapeQuality">
+                <option value="stable">稳定低内存</option>
+                <option value="balanced" selected>均衡</option>
+                <option value="high">高质量</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>参考图尺寸</span>
+              <select id="referenceSize">
+                <option value="1024">1024</option>
+                <option value="1536">1536</option>
+                <option value="2048">2048</option>
+              </select>
+            </label>
           </div>
 
-          <label class="slider-row">
-            <span>Canny 约束 <b id="cannyValue">2.85</b></span>
-            <input id="cannyScale" type="range" min="0" max="3.5" step="0.05" value="2.85" />
-          </label>
-
-          <label class="slider-row">
-            <span>Depth 约束 <b id="depthValue">0.55</b></span>
-            <input id="depthScale" type="range" min="0" max="2.0" step="0.05" value="0.55" />
-          </label>
-
-          <label class="toggle-row">
-            <input id="geometryLock" type="checkbox" checked />
-            <span>几何锁定</span>
-          </label>
-
-          <button id="runButton" class="primary-button" type="submit">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
-            <span>启动全流程</span>
+          <button id="generate3dButton" class="primary-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l7 4v8l-7 8-7-8V6l7-4z"/><path d="M12 22v-8"/><path d="M5 6l7 8 7-8"/></svg>
+            <span>生成 / 载入 3D</span>
           </button>
-        </form>
+          <pre id="sourceDetails" class="stage-details"></pre>
+        </section>
+
+        <section class="stage-block" data-stage-block="camera">
+          <div class="stage-head">
+            <span class="step-index">2</span>
+            <div>
+              <h2>固定 3D 视角</h2>
+              <p id="cameraStatus">载入模型后可操作</p>
+            </div>
+          </div>
+          <div class="toolbar-grid">
+            <button class="secondary-button" data-view="front" type="button">前</button>
+            <button class="secondary-button" data-view="side" type="button">侧</button>
+            <button class="secondary-button" data-view="back" type="button">后</button>
+            <button class="secondary-button" data-view="hero" type="button">45 度</button>
+          </div>
+          <div class="toolbar-grid">
+            <button id="resetCameraButton" class="secondary-button" type="button">重置</button>
+            <button id="lockCameraButton" class="secondary-button" type="button" disabled>固定当前视角</button>
+          </div>
+          <pre id="cameraJson" class="mini-code">未固定</pre>
+        </section>
+
+        <section class="stage-block" data-stage-block="white">
+          <div class="stage-head">
+            <span class="step-index">3</span>
+            <div>
+              <h2>渲染白模通道</h2>
+              <p id="whiteStatus">等待固定视角</p>
+            </div>
+          </div>
+          <div class="number-grid">
+            <label class="field">
+              <span>白模分辨率</span>
+              <input id="renderResolution" type="number" min="512" max="2048" step="128" value="1024" />
+            </label>
+            <label class="field">
+              <span>采样</span>
+              <input id="renderSamples" type="number" min="8" max="256" step="8" value="64" />
+            </label>
+          </div>
+          <button id="renderWhiteButton" class="primary-button" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 12h8"/></svg>
+            <span>按固定视角渲染白模</span>
+          </button>
+          <pre id="whiteDetails" class="stage-details"></pre>
+        </section>
+
+        <section class="stage-block" data-stage-block="ai">
+          <div class="stage-head">
+            <span class="step-index">4</span>
+            <div>
+              <h2>AI 渲染成图</h2>
+              <p id="aiStatus">等待白模通道</p>
+            </div>
+          </div>
+          <label class="field">
+            <span>最终渲染提示词</span>
+            <textarea id="renderPrompt" rows="4">same exact 3D model silhouette, premium red hypercar material, glossy clearcoat, black glass, clean studio product render, crisp reflections, high-end automotive visualization</textarea>
+          </label>
+          <label class="field">
+            <span>负向提示词</span>
+            <textarea id="negativePrompt" rows="3">geometry drift, changed silhouette, extra parts, missing wheels, noisy texture, gritty surface, text, watermark, logo</textarea>
+          </label>
+          <div class="number-grid">
+            <label class="field">
+              <span>AI 后端</span>
+              <select id="aiBackend">
+                <option value="agent">HiDream Agent</option>
+                <option value="sdxl">SDXL ControlNet</option>
+                <option value="mock">快速验证 mock</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Agent 预算</span>
+              <select id="agentBudget">
+                <option value="1" selected>单次真实</option>
+                <option value="3">快速调优</option>
+                <option value="10">渐进中等</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>AI steps</span>
+              <input id="aiSteps" type="number" min="4" max="50" step="1" value="12" />
+            </label>
+            <label class="field">
+              <span>AI 分辨率</span>
+              <select id="aiResolution">
+                <option value="1024" selected>1024</option>
+                <option value="2048">2048</option>
+              </select>
+            </label>
+          </div>
+          <button id="renderAiButton" class="primary-button" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/></svg>
+            <span>生成最终对照图</span>
+          </button>
+          <pre id="aiDetails" class="stage-details"></pre>
+        </section>
       </section>
 
-      <section class="status-panel">
+      <section class="panel viewport-panel">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">Run</p>
-            <h2 id="jobTitle">待命</h2>
+            <p class="eyebrow">Interactive 3D</p>
+            <h2 id="modelTitle">未载入模型</h2>
           </div>
-          <span id="statusPill" class="status-pill">idle</span>
+          <span id="viewerPill" class="status-pill">idle</span>
         </div>
-        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
-        <div id="stageRail" class="stage-rail">
-          <span data-stage="prepare">准备</span>
-          <span data-stage="3d">3D</span>
-          <span data-stage="render">白模</span>
-          <span data-stage="ai">AI</span>
-          <span data-stage="score">评分</span>
-          <span data-stage="complete">完成</span>
+        <div id="viewer" class="viewer">
+          <div id="viewerEmpty" class="viewer-empty">生成或载入 3D 后，可在这里拖转、缩放和平移白模</div>
         </div>
-        <pre id="logBox" class="log-box"></pre>
-
-        <div class="model-box">
-          <h3>模型状态</h3>
-          <div id="modelStatus" class="model-status"></div>
+        <div class="model-path-row">
+          <span>模型</span>
+          <code id="activeModelPath">-</code>
         </div>
       </section>
 
-      <section class="artifact-panel">
+      <section class="panel result-panel">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">Artifacts</p>
-            <h2>结果预览</h2>
+            <p class="eyebrow">Outputs</p>
+            <h2>阶段产物</h2>
           </div>
-          <a id="openWorkdir" class="text-link" href="#" target="_blank" rel="noreferrer">workdir</a>
+          <a id="reportLink" class="text-link" href="#" target="_blank" rel="noreferrer">report</a>
         </div>
+
+        <div id="stageSummary" class="stage-summary"></div>
 
         <div class="preview-grid">
-          <figure>
-            <figcaption>白模</figcaption>
-            <img id="whiteImage" alt="白模渲染" />
+          <figure class="is-empty">
+            <figcaption>固定视角白模</figcaption>
+            <img id="whiteImage" alt="固定视角白模" hidden />
           </figure>
-          <figure>
+          <figure class="is-empty">
             <figcaption>最终渲染</figcaption>
-            <img id="finalImage" alt="最终渲染" />
+            <img id="finalImage" alt="最终 AI 渲染" hidden />
           </figure>
-          <figure class="figure-wide">
-            <figcaption>对照</figcaption>
-            <img id="comparisonImage" alt="白模和最终渲染对照" />
+          <figure class="figure-wide is-empty">
+            <figcaption>白模 / 成图对照</figcaption>
+            <img id="comparisonImage" alt="白模和最终渲染对照" hidden />
           </figure>
         </div>
+
+        <div class="artifact-links" id="artifactLinks"></div>
       </section>
     </main>
 
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

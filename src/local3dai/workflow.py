@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .ai.backends import build_backend
 from .ai.geometry import create_comparison_image
 from .config import load_config, resolve_path
@@ -43,6 +44,10 @@ class WorkflowOptions:
     geometry_lock: bool = True
     negative_prompt: str = ""
     model_key: str = "sdxl_controlnet_geometry"
+    agent_render: bool = False
+    agent_max_generations: int = 10
+    agent_target_view: str = "view_05"
+    agent_expand_views: bool = True
 
 
 def _direct_download_env() -> dict[str, str]:
@@ -70,8 +75,11 @@ def _run_hunyuan_shape(
     metadata: Path,
     seed: int,
     progress: Progress,
+    shape_overrides: dict[str, Any] | None = None,
 ) -> Path:
-    hunyuan = _model_cfg(config, "hunyuan3d_2_1_shape")
+    hunyuan = dict(_model_cfg(config, "hunyuan3d_2_1_shape"))
+    if shape_overrides:
+        hunyuan.update(shape_overrides)
     script = Path(hunyuan.get("script", "scripts/run_hunyuan_shape_white.py"))
     command = [
         str(Path(config["system"].get("python") or ".venv/bin/python")),
@@ -97,7 +105,7 @@ def _run_hunyuan_shape(
         "--seed",
         str(seed),
     ]
-    progress("3d", "Running Hunyuan3D 2.1 shape generation", 0.16)
+    progress("source", "Running Hunyuan3D 2.1 shape generation", 0.16)
     subprocess.run(command, check=True, env=_direct_download_env())
     if not output_model.exists():
         raise RuntimeError(f"Hunyuan3D did not write the expected mesh: {output_model}")
@@ -125,6 +133,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
 
     emit("prepare", "Preparing local workflow directories", 0.03)
     model_path: Path
+    emit("source", f"Resolving 3D source: {options.source_mode}", 0.09)
     if options.source_mode == "hunyuan_reference":
         if not options.reference_image:
             raise RuntimeError("Hunyuan3D mode requires a reference image.")
@@ -153,6 +162,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         model_path = Path(existing)
         if not model_path.exists():
             raise RuntimeError(f"Default white mesh was not found: {model_path}")
+    emit("source", f"3D source ready: {model_path}", 0.24)
 
     emit("render", "Rendering white model channels in Blender", 0.31)
     render_cfg = config["render"]
@@ -168,6 +178,71 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         samples=options.render_samples or int(render_cfg["samples"]),
         camera_distance=float(render_cfg["camera_distance"]),
     )
+
+    if options.agent_render:
+        emit("agent", "Running Agent v1 render tuning", 0.62)
+        agent_cfg = config.get("agent", {})
+        agent_summary = run_agent_render(
+            AgentRunOptions(
+                input_renders=Path(render_manifest),
+                output_dir=workdir / "agent",
+                prompt=options.prompt,
+                config_path=options.config_path,
+                model_key=options.model_key or "hidream_o1_image_full",
+                target_view=options.agent_target_view or str(agent_cfg.get("target_view", "view_05")),
+                max_generations=options.agent_max_generations or int(agent_cfg.get("max_generations", 10)),
+                seed=options.seed,
+                expand_views=options.agent_expand_views,
+                expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_01", "view_05", "view_06"])),
+                default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge"])),
+                experimental_reference_channels=tuple(agent_cfg.get("experimental_reference_channels", [])),
+                pass_threshold=float(agent_cfg.get("pass_threshold", 0.62)),
+                roughness_weight=float(agent_cfg.get("roughness_weight", 0.25)),
+                edge_weight=float(agent_cfg.get("edge_weight", 0.35)),
+                mask_weight=float(agent_cfg.get("mask_weight", 0.25)),
+                background_weight=float(agent_cfg.get("background_weight", 0.15)),
+                negative_prompt=options.negative_prompt,
+                steps=options.steps,
+                width=options.ai_width,
+                height=options.ai_height,
+            ),
+            progress=lambda stage, message, fraction: emit(stage, message, 0.62 + fraction * 0.34),
+        )
+        with Path(render_manifest).open("r", encoding="utf-8") as fh:
+            render_data = json.load(fh)
+        target_view_id = agent_summary.get("target_view")
+        white_image = ""
+        for view in render_data.get("views", []):
+            if view.get("view_id") == target_view_id:
+                white_image = view["files"]["rgb"]
+                break
+        if not white_image and render_data.get("views"):
+            white_image = render_data["views"][0]["files"]["rgb"]
+        emit("package", "Packaging Agent artifacts and run summary", 0.97)
+        summary = {
+            "type": "workflow_summary",
+            "status": agent_summary["status"],
+            "workdir": str(workdir),
+            "prompt": options.prompt,
+            "source_mode": options.source_mode,
+            "model_path": str(model_path),
+            "render_manifest": str(render_manifest),
+            "ai_manifest": "",
+            "score_report": "",
+            "agent_report": agent_summary["agent_report"],
+            "score_summary": summarize_agent_report(agent_summary["agent_report"]),
+            "white_image": white_image,
+            "final_image": agent_summary["final_image"],
+            "comparison_image": agent_summary["comparison_image"],
+            "three_view_contact": agent_summary.get("three_view_contact", ""),
+            "agent_summary": agent_summary,
+            "elapsed_seconds": round(time.time() - started, 3),
+        }
+        with (workdir / "run_summary.json").open("w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        emit("complete", "Agent workflow complete", 1.0)
+        return summary
 
     emit("ai", "Generating geometry-constrained AI render candidates", 0.62)
     model_cfg = _model_cfg(config, options.model_key)
@@ -219,6 +294,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         output=workdir / "white_vs_final.png",
     )
 
+    emit("package", "Packaging final artifacts and run summary", 0.97)
     summary = {
         "type": "workflow_summary",
         "status": "complete",

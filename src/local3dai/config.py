@@ -51,6 +51,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "prompt_weight": 0.2,
         "copy_top_k": 1,
     },
+    "agent": {
+        "enabled": True,
+        "max_generations": 10,
+        "target_view": "view_05",
+        "expand_view_ids": ["view_01", "view_05", "view_06"],
+        "default_reference_channels": ["rgb", "edge"],
+        "experimental_reference_channels": [],
+        "roughness_weight": 0.25,
+        "edge_weight": 0.35,
+        "mask_weight": 0.25,
+        "background_weight": 0.15,
+        "pass_threshold": 0.62,
+    },
 }
 
 

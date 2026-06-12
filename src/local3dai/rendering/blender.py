@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import json
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -42,9 +43,12 @@ def render_model_with_blender(
     blender_path: str | None = None,
     views: int = 8,
     resolution: int = 1024,
+    resolution_x: int | None = None,
+    resolution_y: int | None = None,
     engine: str = "CYCLES",
     samples: int = 64,
     camera_distance: float = 3.2,
+    camera: dict[str, Any] | None = None,
 ) -> Path:
     executable = blender_path or shutil.which("blender")
     if not executable:
@@ -73,6 +77,10 @@ def render_model_with_blender(
         "--camera-distance",
         str(camera_distance),
     ]
+    if resolution_x and resolution_y:
+        command.extend(["--resolution-x", str(resolution_x), "--resolution-y", str(resolution_y)])
+    if camera is not None:
+        command.extend(["--camera-json", json.dumps(camera)])
     subprocess.run(command, check=True)
     manifest = output / "manifest.json"
     if not manifest.exists():

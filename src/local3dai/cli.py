@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
@@ -159,6 +160,44 @@ def cmd_score(args: argparse.Namespace) -> int:
     )
     print(summarize_report(report))
     print(f"Wrote score report: {report}")
+    return 0
+
+
+def cmd_agent_render(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    agent_cfg = config.get("agent", {})
+    report = run_agent_render(
+        AgentRunOptions(
+            input_renders=Path(args.input_renders),
+            output_dir=Path(args.output),
+            prompt=args.prompt,
+            config_path=Path(args.config),
+            model_key=args.model_key or "hidream_o1_image_full",
+            backend=args.backend,
+            model_ref=args.model_ref,
+            target_view=args.target_view or str(agent_cfg.get("target_view", "view_05")),
+            max_generations=args.max_generations or int(agent_cfg.get("max_generations", 10)),
+            seed=args.seed if args.seed is not None else int(config["ai"].get("seed", 20260610)),
+            expand_views=bool(args.expand_views),
+            expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_01", "view_05", "view_06"])),
+            default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge"])),
+            experimental_reference_channels=tuple(agent_cfg.get("experimental_reference_channels", [])),
+            pass_threshold=float(agent_cfg.get("pass_threshold", 0.62)),
+            roughness_weight=float(agent_cfg.get("roughness_weight", 0.25)),
+            edge_weight=float(agent_cfg.get("edge_weight", 0.35)),
+            mask_weight=float(agent_cfg.get("mask_weight", 0.25)),
+            background_weight=float(agent_cfg.get("background_weight", 0.15)),
+            negative_prompt=args.negative_prompt or "",
+            device=args.device,
+            dtype=args.dtype,
+            variant=args.variant,
+            steps=args.steps,
+            width=args.ai_width,
+            height=args.ai_height,
+        )
+    )
+    print(summarize_agent_report(report["agent_report"]))
+    print(f"Wrote agent report: {report['agent_report']}")
     return 0
 
 
@@ -322,6 +361,27 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--output", required=True)
     score.add_argument("--top-k", type=int)
     score.set_defaults(func=cmd_score)
+
+    agent_render = subparsers.add_parser("agent-render", help="Run Agent v1 prompt/reference/seed tuning from render channels")
+    agent_render.add_argument("--input-renders", required=True)
+    agent_render.add_argument("--output", required=True)
+    agent_render.add_argument("--prompt", required=True)
+    agent_render.add_argument("--backend", help="Override configured AI backend, e.g. mock for CPU tests")
+    agent_render.add_argument("--model-key", default="hidream_o1_image_full")
+    agent_render.add_argument("--model-ref")
+    agent_render.add_argument("--target-view", default=None)
+    agent_render.add_argument("--max-generations", type=int)
+    agent_render.add_argument("--seed", type=int)
+    agent_render.add_argument("--expand-views", dest="expand_views", action="store_true", default=True)
+    agent_render.add_argument("--no-expand-views", dest="expand_views", action="store_false")
+    agent_render.add_argument("--device")
+    agent_render.add_argument("--dtype")
+    agent_render.add_argument("--variant")
+    agent_render.add_argument("--steps", type=int)
+    agent_render.add_argument("--negative-prompt")
+    agent_render.add_argument("--ai-width", type=int)
+    agent_render.add_argument("--ai-height", type=int)
+    agent_render.set_defaults(func=cmd_agent_render)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
     run.add_argument("--prompt", required=True)

@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,9 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--views", type=int, default=8)
     parser.add_argument("--resolution", type=int, default=1024)
+    parser.add_argument("--resolution-x", type=int, default=0)
+    parser.add_argument("--resolution-y", type=int, default=0)
     parser.add_argument("--engine", default="CYCLES")
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--camera-distance", type=float, default=3.2)
+    parser.add_argument("--camera-json", default="", help="Optional fixed CameraState JSON or path. Renders one view_locked view.")
     return parser.parse_args(argv)
 
 
@@ -67,9 +70,9 @@ def normalize_model() -> None:
     center = (min_corner + max_corner) / 2
     size = max((max_corner - min_corner).x, (max_corner - min_corner).y, (max_corner - min_corner).z)
     scale = 1.8 / size if size else 1.0
+    transform = Matrix.Diagonal((scale, scale, scale, 1.0)) @ Matrix.Translation(-center)
     for obj in objects:
-        obj.location -= center
-        obj.scale *= scale
+        obj.matrix_world = transform @ obj.matrix_world
     bpy.context.view_layer.update()
 
 
@@ -82,8 +85,8 @@ def configure_scene(args: argparse.Namespace) -> None:
     if scene.render.engine == "CYCLES":
         scene.cycles.samples = args.samples
         scene.cycles.use_denoising = True
-    scene.render.resolution_x = args.resolution
-    scene.render.resolution_y = args.resolution
+    scene.render.resolution_x = args.resolution_x or args.resolution
+    scene.render.resolution_y = args.resolution_y or args.resolution
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGB"
     scene.render.film_transparent = False
@@ -120,6 +123,21 @@ def add_lights() -> None:
     fill = bpy.context.object
     fill.data.energy = 110
     fill.data.size = 5
+
+
+def assign_clay_material() -> None:
+    material = bpy.data.materials.new("white_clay_preview_material")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    principled = nodes.get("Principled BSDF")
+    if principled:
+        principled.inputs["Base Color"].default_value = (0.86, 0.88, 0.9, 1)
+        principled.inputs["Roughness"].default_value = 0.52
+        principled.inputs["Metallic"].default_value = 0.0
+    material.diffuse_color = (0.86, 0.88, 0.9, 1)
+    for obj in mesh_objects():
+        obj.data.materials.clear()
+        obj.data.materials.append(material)
 
 
 def assign_emission(name: str, color: tuple[float, float, float, float]) -> None:
@@ -210,19 +228,50 @@ def ensure_freestyle_line_set() -> None:
     view_layer.freestyle_settings.linesets[0].linestyle.thickness = 2.2
 
 
-def render_view(
+def camera_position_from_state(camera_state: dict[str, object], base_distance: float) -> Vector:
+    position_values = camera_state.get("position")
+    if isinstance(position_values, list | tuple) and len(position_values) == 3:
+        return Vector((float(position_values[0]), float(position_values[1]), float(position_values[2])))
+    target_values = camera_state.get("target", [0.0, 0.0, 0.05])
+    if not isinstance(target_values, list | tuple) or len(target_values) != 3:
+        target_values = [0.0, 0.0, 0.05]
+    target = Vector((float(target_values[0]), float(target_values[1]), float(target_values[2])))
+    azimuth = math.radians(float(camera_state.get("azimuth_deg", 35.0)))
+    elevation = math.radians(float(camera_state.get("elevation_deg", 18.0)))
+    distance_scale = max(0.25, float(camera_state.get("distance_scale", 1.0)))
+    distance = base_distance * distance_scale
+    horizontal = math.cos(elevation) * distance
+    return Vector(
+        (
+            target.x + math.sin(azimuth) * horizontal,
+            target.y - math.cos(azimuth) * horizontal,
+            target.z + math.sin(elevation) * distance,
+        )
+    )
+
+
+def load_camera_state(raw: str) -> dict[str, object] | None:
+    if not raw:
+        return None
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        return json.loads(stripped)
+    path = Path(raw)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(stripped)
+
+
+def render_channels(
     view_id: str,
     output: Path,
     camera: bpy.types.Object,
-    angle: float,
-    orbit_radius: float,
+    max_depth_distance: float,
     material_snapshot: dict[str, list[bpy.types.Material]],
 ) -> dict[str, str]:
     view_dir = output / view_id
     view_dir.mkdir(parents=True, exist_ok=True)
     restore_materials(material_snapshot)
-    camera.location = (math.sin(angle) * orbit_radius, -math.cos(angle) * orbit_radius, camera.location.z)
-    point_camera(camera)
 
     scene = bpy.context.scene
     original_world = scene.world.color[:]
@@ -231,7 +280,7 @@ def render_view(
     save_render(rgb_path)
 
     scene.world.color = (0, 0, 0)
-    assign_depth_material(orbit_radius * 2.5)
+    assign_depth_material(max_depth_distance)
     depth_path = view_dir / "depth.png"
     save_render(depth_path)
 
@@ -259,6 +308,35 @@ def render_view(
     }
 
 
+def render_view(
+    view_id: str,
+    output: Path,
+    camera: bpy.types.Object,
+    angle: float,
+    orbit_radius: float,
+    material_snapshot: dict[str, list[bpy.types.Material]],
+) -> dict[str, str]:
+    camera.location = (math.sin(angle) * orbit_radius, -math.cos(angle) * orbit_radius, camera.location.z)
+    point_camera(camera)
+    return render_channels(view_id, output, camera, orbit_radius * 2.5, material_snapshot)
+
+
+def render_locked_view(
+    output: Path,
+    camera: bpy.types.Object,
+    camera_state: dict[str, object],
+    base_distance: float,
+    material_snapshot: dict[str, list[bpy.types.Material]],
+) -> dict[str, str]:
+    camera.location = camera_position_from_state(camera_state, base_distance)
+    target_values = camera_state.get("target", [0.0, 0.0, 0.05])
+    if not isinstance(target_values, list | tuple) or len(target_values) != 3:
+        target_values = [0.0, 0.0, 0.05]
+    camera.data.ortho_scale = max(0.4, float(camera_state.get("ortho_scale", camera.data.ortho_scale)))
+    point_camera(camera, Vector((float(target_values[0]), float(target_values[1]), float(target_values[2]))))
+    return render_channels("view_locked", output, camera, base_distance * max(0.25, float(camera_state.get("distance_scale", 1.0))) * 2.5, material_snapshot)
+
+
 def main() -> None:
     args = parse_args()
     output = Path(args.output)
@@ -268,15 +346,21 @@ def main() -> None:
     normalize_model()
     configure_scene(args)
     add_lights()
+    assign_clay_material()
     camera = make_camera(args.camera_distance)
     material_snapshot = capture_materials()
 
     manifest = {"type": "render_manifest", "source": str(args.model), "views": []}
-    for index in range(args.views):
-        angle = math.tau * index / max(args.views, 1)
-        view_id = f"view_{index:02d}"
-        files = render_view(view_id, output, camera, angle, args.camera_distance, material_snapshot)
-        manifest["views"].append({"view_id": view_id, "azimuth_deg": round(math.degrees(angle), 3), "files": files})
+    fixed_camera = load_camera_state(args.camera_json)
+    if fixed_camera:
+        files = render_locked_view(output, camera, fixed_camera, args.camera_distance, material_snapshot)
+        manifest["views"].append({"view_id": "view_locked", "camera": fixed_camera, "files": files})
+    else:
+        for index in range(args.views):
+            angle = math.tau * index / max(args.views, 1)
+            view_id = f"view_{index:02d}"
+            files = render_view(view_id, output, camera, angle, args.camera_distance, material_snapshot)
+            manifest["views"].append({"view_id": view_id, "azimuth_deg": round(math.degrees(angle), 3), "files": files})
 
     with (output / "manifest.json").open("w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)

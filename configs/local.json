@@ -1,18 +1,18 @@
 {
   "system": {
-    "workspace": "/root/sakura/work/build",
+    "workspace": "/root/sakura/work/Harmonize3D",
     "os": "Linux 6.6.87.2-microsoft-standard-WSL2",
-    "python": "/root/sakura/work/build/.venv/bin/python3",
+    "python": "/root/sakura/work/Harmonize3D/.venv/bin/python3",
     "gpu_name": "NVIDIA GeForce RTX 5090 D",
     "gpu_vram_mb": 32607,
     "nvidia_driver": "610.47",
     "cuda_runtime_reported_by_driver": "13.3",
-    "blender_path": "/root/sakura/work/build/tools/blender-5.1.2-linux-x64/blender"
+    "blender_path": "/root/sakura/work/Harmonize3D/tools/blender-5.1.2-linux-x64/blender"
   },
   "paths": {
-    "models_dir": "/root/sakura/work/build/models",
-    "outputs_dir": "/root/sakura/work/build/outputs",
-    "blender_script": "/root/sakura/work/build/blender_scripts/batch_render.py"
+    "models_dir": "/root/sakura/work/Harmonize3D/models",
+    "outputs_dir": "/root/sakura/work/Harmonize3D/outputs",
+    "blender_script": "/root/sakura/work/Harmonize3D/blender_scripts/batch_render.py"
   },
   "render": {
     "resolution": 1024,
@@ -24,7 +24,7 @@
   "model_generation": {
     "default_backend": "sample",
     "external_command": "",
-    "output_dir": "/root/sakura/work/build/outputs/generated_models"
+    "output_dir": "/root/sakura/work/Harmonize3D/outputs/generated_models"
   },
   "ai": {
     "default_backend": "sdxl-controlnet-geometry",
@@ -38,24 +38,50 @@
     "width": 1536,
     "height": 1536
   },
+  "web": {
+    "agent_max_generations": 10,
+    "ai_steps": 12,
+    "ai_resolution": 1024
+  },
   "models": {
     "hunyuan3d_2_1_shape": {
       "backend": "hunyuan3d-shape",
-      "repo_root": "/root/sakura/work/build/tools/Hunyuan3D-2.1",
-      "model_path": "/root/sakura/work/build/models/Hunyuan3D-2.1",
-      "script": "/root/sakura/work/build/scripts/run_hunyuan_shape_white.py",
+      "repo_root": "/root/sakura/work/Harmonize3D/tools/Hunyuan3D-2.1",
+      "model_path": "/root/sakura/work/Harmonize3D/models/Hunyuan3D-2.1",
+      "script": "/root/sakura/work/Harmonize3D/scripts/run_hunyuan_shape_white.py",
       "enabled": true,
-      "steps": 50,
+      "default_profile": "balanced",
+      "steps": 12,
       "guidance_scale": 5.0,
-      "octree_resolution": 384,
+      "octree_resolution": 256,
       "num_chunks": 8000,
+      "profiles": {
+        "stable": {
+          "steps": 5,
+          "guidance_scale": 5.0,
+          "octree_resolution": 256,
+          "num_chunks": 8000
+        },
+        "balanced": {
+          "steps": 12,
+          "guidance_scale": 5.0,
+          "octree_resolution": 256,
+          "num_chunks": 8000
+        },
+        "high": {
+          "steps": 20,
+          "guidance_scale": 5.0,
+          "octree_resolution": 384,
+          "num_chunks": 12000
+        }
+      },
       "license_note": "Tencent Hunyuan3D 2.1 shape model. Use local mirrored weights for offline runs."
     },
     "sdxl_controlnet_geometry": {
       "backend": "sdxl-controlnet-geometry",
-      "base_model": "/root/sakura/work/build/models/sdxl-base-1.0",
-      "canny_controlnet": "/root/sakura/work/build/models/controlnet-canny-sdxl-1.0",
-      "depth_controlnet": "/root/sakura/work/build/models/controlnet-depth-sdxl-1.0",
+      "base_model": "/root/sakura/work/Harmonize3D/models/sdxl-base-1.0",
+      "canny_controlnet": "/root/sakura/work/Harmonize3D/models/controlnet-canny-sdxl-1.0",
+      "depth_controlnet": "/root/sakura/work/Harmonize3D/models/controlnet-depth-sdxl-1.0",
       "variant": "fp16",
       "enabled": true,
       "width": 1536,
@@ -72,8 +98,8 @@
     },
     "hidream_o1_image_full": {
       "backend": "hidream-o1-image",
-      "repo_root": "/root/sakura/work/build/tools/HiDream-O1-Image",
-      "local_path": "/root/sakura/work/build/models/HiDream-O1-Image",
+      "repo_root": "/root/sakura/work/Harmonize3D/tools/HiDream-O1-Image",
+      "local_path": "/root/sakura/work/Harmonize3D/models/HiDream-O1-Image",
       "model_type": "full",
       "enabled": true,
       "width": 2048,
@@ -90,7 +116,7 @@
     "sd_turbo": {
       "backend": "diffusers-img2img",
       "model_id": "stabilityai/sd-turbo",
-      "local_path": "/root/sakura/work/build/models/sd-turbo",
+      "local_path": "/root/sakura/work/Harmonize3D/models/sd-turbo",
       "variant": "fp16",
       "enabled": true,
       "license_note": "Public Stability AI Turbo model for local validation; check current license terms for production use."
@@ -98,7 +124,7 @@
     "sdxl_turbo": {
       "backend": "diffusers-img2img",
       "model_id": "stabilityai/sdxl-turbo",
-      "local_path": "/root/sakura/work/build/models/sdxl-turbo",
+      "local_path": "/root/sakura/work/Harmonize3D/models/sdxl-turbo",
       "variant": "fp16",
       "enabled": true,
       "license_note": "Local FP16 SDXL Turbo image-to-image renderer; check current Stability AI license terms for production use."
@@ -130,5 +156,25 @@
     "mask_weight": 0.25,
     "prompt_weight": 0.2,
     "copy_top_k": 1
+  },
+  "agent": {
+    "enabled": true,
+    "max_generations": 10,
+    "target_view": "view_05",
+    "expand_view_ids": [
+      "view_01",
+      "view_05",
+      "view_06"
+    ],
+    "default_reference_channels": [
+      "rgb",
+      "edge"
+    ],
+    "experimental_reference_channels": [],
+    "roughness_weight": 0.25,
+    "edge_weight": 0.35,
+    "mask_weight": 0.25,
+    "background_weight": 0.15,
+    "pass_threshold": 0.62
   }
 }
