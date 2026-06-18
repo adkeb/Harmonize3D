@@ -1114,6 +1114,60 @@ def _uses_external_imagegen(config: dict[str, Any] | None) -> bool:
     return _reference_generation_provider(config) in {"external", "external_imagegen", "imagegen", "imagegen_skill", "manual_image2"}
 
 
+def _write_codex_image2_handoff(
+    *,
+    handoff_path: Path,
+    request: dict[str, Any],
+    batch_requests: list[dict[str, Any]] | None = None,
+) -> Path:
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Codex image2 Handoff",
+        "",
+        "Use the Codex built-in image2/imagegen skill to create the requested image asset(s).",
+        "Do not use DashScope/Qwen image generation or a local fallback model for this handoff.",
+        "Do not add a negative prompt. All constraints are already in the positive prompt.",
+        "",
+        f"- Request kind: `{request.get('kind') or request.get('type')}`",
+        f"- Request status: `{request.get('status')}`",
+    ]
+    if request.get("source_image"):
+        lines.append(f"- Source image: `{request['source_image']}`")
+    if request.get("output_path"):
+        lines.append(f"- Output path: `{request['output_path']}`")
+    lines.extend(["", "## Steps", ""])
+    lines.extend(
+        [
+            "1. Generate the image with Codex built-in image2/imagegen using the prompt below.",
+            "2. If a source image is listed, use it as visual context/reference, not as the final render input.",
+            "3. Save the selected generated image exactly to the listed output path.",
+            "4. Rerun the same Auto Scene workdir so the image can be returned to qwen3.7-plus for review.",
+            "",
+        ]
+    )
+    requests = batch_requests or [request]
+    for index, item in enumerate(requests, start=1):
+        lines.extend(
+            [
+                f"## Image2 Request {index}",
+                "",
+                f"- Kind: `{item.get('kind') or item.get('type')}`",
+                f"- Module id: `{item.get('module_id', '')}`",
+                f"- Output path: `{item.get('output_path', '')}`",
+                f"- Source image: `{item.get('source_image', '')}`",
+                "",
+                "Prompt:",
+                "",
+                "```text",
+                str(item.get("prompt") or ""),
+                "```",
+                "",
+            ]
+        )
+    handoff_path.write_text("\n".join(lines), encoding="utf-8")
+    return handoff_path
+
+
 def _write_external_imagegen_request(
     *,
     output: Path,
@@ -1127,11 +1181,13 @@ def _write_external_imagegen_request(
     request = {
         "type": "external_imagegen_request",
         "status": "awaiting_external_imagegen",
+        "provider": "codex_builtin_image2",
         "kind": kind,
         "module_id": module_id,
         "output_path": str(output.expanduser().resolve()),
         "prompt": prompt,
         "source_image": str(source_image_path) if source_image_path else "",
+        "codex_image2_handoff": str(output.with_name("codex_image2_handoff.md").expanduser().resolve()),
         "resume_instruction": "Generate the requested image, copy it to output_path, then rerun the same auto-scene command/workdir.",
         "instructions": [
             "Generate this image with the Codex imagegen/image2 skill, not a local model.",
@@ -1140,6 +1196,7 @@ def _write_external_imagegen_request(
             "Then rerun this stage so the image can be returned to the multimodal agent for review.",
         ],
     }
+    _write_codex_image2_handoff(handoff_path=Path(request["codex_image2_handoff"]), request=request)
     write_manifest(request_path, request)
     return request_path
 
@@ -1723,16 +1780,24 @@ def generate_module_references(
                 pending_requests.append(request)
         if pending_requests:
             batch_path = workdir / "modules" / "imagegen_batch_request.json"
+            batch_request = {
+                "type": "external_imagegen_batch_request",
+                "status": "awaiting_external_imagegen",
+                "provider": "codex_builtin_image2",
+                "kind": "module_reference_batch",
+                "request_count": len(pending_requests),
+                "requests": pending_requests,
+                "codex_image2_handoff": str((workdir / "modules" / "codex_image2_batch_handoff.md").expanduser().resolve()),
+                "resume_instruction": "Generate every requested module image, copy each selected image to output_path, then rerun this auto-scene workdir.",
+            }
+            _write_codex_image2_handoff(
+                handoff_path=Path(batch_request["codex_image2_handoff"]),
+                request=batch_request,
+                batch_requests=pending_requests,
+            )
             write_manifest(
                 batch_path,
-                {
-                    "type": "external_imagegen_batch_request",
-                    "status": "awaiting_external_imagegen",
-                    "kind": "module_reference_batch",
-                    "request_count": len(pending_requests),
-                    "requests": pending_requests,
-                    "resume_instruction": "Generate every requested module image, copy each selected image to output_path, then rerun this auto-scene workdir.",
-                },
+                batch_request,
             )
             _raise_external_imagegen_required(batch_path)
 
@@ -3734,10 +3799,12 @@ def _pending_external_imagegen_summary(
         "camera_plan": workdir / "cameras" / "camera_plan.json",
         "concept_image_plan": workdir / "concept" / "concept_image_plan.json",
         "concept_image_request": workdir / "concept" / "imagegen_request.json",
+        "concept_image2_handoff": workdir / "concept" / "codex_image2_handoff.md",
         "module_plan": workdir / "modules" / "module_plan.json",
         "module_prompt_info": workdir / "modules" / "module_prompt_info.json",
         "module_layout_check": workdir / "modules" / "module_layout_check.json",
         "module_reference_batch_request": workdir / "modules" / "imagegen_batch_request.json",
+        "module_reference_image2_handoff": workdir / "modules" / "codex_image2_batch_handoff.md",
         "final_image2_request": workdir / "final" / "codex_image2_final_request.json",
         "tool_calls": tool_calls_path,
         "run_log": workdir / "reports" / "run.log",
@@ -3757,6 +3824,7 @@ def _pending_external_imagegen_summary(
             "module_id": request_error.module_id,
             "output_path": _absolute_artifact_path(request_error.output_path),
             "output_paths": request_error.output_paths,
+            "codex_image2_handoff": _absolute_artifact_path(request_data.get("codex_image2_handoff", "")),
             "resume_instruction": "Use Codex imagegen/image2 to create the requested image files, copy them to output_path, then rerun the same Auto Scene workdir.",
         },
         "artifacts": artifacts,

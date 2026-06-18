@@ -592,8 +592,16 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["kind"], "concept")
             self.assertEqual(request["prompt"], "agent concept prompt")
             self.assertEqual(request["status"], "awaiting_external_imagegen")
+            self.assertEqual(request["provider"], "codex_builtin_image2")
             self.assertNotIn("negative_prompt", request)
             self.assertTrue(Path(request["output_path"]).is_absolute())
+            handoff = Path(request["codex_image2_handoff"])
+            self.assertTrue(handoff.is_absolute())
+            self.assertTrue(handoff.exists())
+            handoff_text = handoff.read_text(encoding="utf-8")
+            self.assertIn("agent concept prompt", handoff_text)
+            self.assertIn(request["output_path"], handoff_text)
+            self.assertNotIn("negative_prompt", handoff_text)
 
     def test_concept_generation_can_use_dashscope_imagegen_file_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,6 +762,13 @@ class AutoSceneTest(unittest.TestCase):
             batch = read_manifest(root / "modules" / "imagegen_batch_request.json")
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["requests"][0]["source_image"], str(concept_output))
+            self.assertEqual(batch["provider"], "codex_builtin_image2")
+            handoff = Path(batch["codex_image2_handoff"])
+            self.assertTrue(handoff.exists())
+            handoff_text = handoff.read_text(encoding="utf-8")
+            self.assertIn("strict orthographic front view", handoff_text)
+            self.assertIn(str(concept_output), handoff_text)
+            self.assertIn(batch["requests"][0]["output_path"], handoff_text)
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
 
             with (
@@ -955,10 +970,13 @@ class AutoSceneTest(unittest.TestCase):
             request = read_manifest(root / "modules" / "main_vehicle" / "imagegen_request.json")
             self.assertEqual(request["kind"], "module_reference")
             self.assertEqual(request["module_id"], "main_vehicle")
+            self.assertEqual(request["provider"], "codex_builtin_image2")
             self.assertNotIn("negative_prompt", request)
+            self.assertTrue(Path(request["codex_image2_handoff"]).exists())
             batch = read_manifest(root / "modules" / "imagegen_batch_request.json")
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["request_count"], 1)
+            self.assertTrue(Path(batch["codex_image2_handoff"]).exists())
 
     def test_module_references_can_use_dashscope_imagegen_file_provider(self) -> None:
         import threading
@@ -1022,11 +1040,15 @@ class AutoSceneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             batch_path = root / "modules" / "imagegen_batch_request.json"
+            handoff_path = root / "modules" / "codex_image2_batch_handoff.md"
+            handoff_path.parent.mkdir(parents=True)
+            handoff_path.write_text("# handoff\n", encoding="utf-8")
             write_manifest(
                 batch_path,
                 {
                     "kind": "module_reference_batch",
                     "status": "awaiting_external_imagegen",
+                    "codex_image2_handoff": str(handoff_path),
                     "requests": [
                         {"output_path": str(root / "modules" / "a" / "reference.png")},
                         {"output_path": str(root / "modules" / "b" / "reference.png")},
@@ -1044,6 +1066,7 @@ class AutoSceneTest(unittest.TestCase):
             output_paths = summary["external_imagegen"]["output_paths"]
             self.assertEqual(len(output_paths), 2)
             self.assertTrue(all(Path(path).is_absolute() for path in output_paths))
+            self.assertEqual(summary["external_imagegen"]["codex_image2_handoff"], str(handoff_path.resolve()))
 
     def test_codex_image2_final_render_writes_white_model_position_lock_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
