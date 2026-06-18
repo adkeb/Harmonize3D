@@ -1121,6 +1121,19 @@ def _write_codex_image2_handoff(
     batch_requests: list[dict[str, Any]] | None = None,
 ) -> Path:
     handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    requests = batch_requests or [request]
+    request_path = str(request.get("request_path") or "")
+    import_lines = [
+        "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \\",
+        f"  --request {request_path or '<request-json-path>'} \\",
+    ]
+    if len(requests) == 1 and batch_requests is None:
+        import_lines.append("  --image /path/to/codex-image2-output.png")
+    else:
+        for index, item in enumerate(requests, start=1):
+            key = str(item.get("module_id") or item.get("view_id") or item.get("kind") or f"item_{index}")
+            import_lines.append(f"  --image {key}=/path/to/codex-image2-output-{index}.png \\")
+        import_lines[-1] = import_lines[-1].rstrip(" \\")
     lines = [
         "# Codex image2 Handoff",
         "",
@@ -1130,6 +1143,7 @@ def _write_codex_image2_handoff(
         "",
         f"- Request kind: `{request.get('kind') or request.get('type')}`",
         f"- Request status: `{request.get('status')}`",
+        f"- Request JSON: `{request_path}`",
     ]
     if request.get("source_image"):
         lines.append(f"- Source image: `{request['source_image']}`")
@@ -1141,11 +1155,16 @@ def _write_codex_image2_handoff(
             "1. Generate the image with Codex built-in image2/imagegen using the prompt below.",
             "2. If a source image is listed, use it as visual context/reference, not as the final render input.",
             "3. Save the selected generated image exactly to the listed output path.",
-            "4. Rerun the same Auto Scene workdir so the image can be returned to qwen3.7-plus for review.",
+            "4. Or import the selected generated image with the command template below, then rerun the same Auto Scene workdir so the image can be returned to qwen3.7-plus for review.",
+            "",
+            "Import command template:",
+            "",
+            "```bash",
+            *import_lines,
+            "```",
             "",
         ]
     )
-    requests = batch_requests or [request]
     for index, item in enumerate(requests, start=1):
         lines.extend(
             [
@@ -1153,9 +1172,21 @@ def _write_codex_image2_handoff(
                 "",
                 f"- Kind: `{item.get('kind') or item.get('type')}`",
                 f"- Module id: `{item.get('module_id', '')}`",
+                f"- View id: `{item.get('view_id', '')}`",
                 f"- Output path: `{item.get('output_path', '')}`",
                 f"- Source image: `{item.get('source_image', '')}`",
                 "",
+            ]
+        )
+        input_images = item.get("input_images", [])
+        if isinstance(input_images, list) and input_images:
+            lines.extend(["Input images:", ""])
+            for image in input_images:
+                if isinstance(image, dict):
+                    lines.append(f"- `{image.get('role', '')}`: `{image.get('path', '')}`")
+            lines.append("")
+        lines.extend(
+            [
                 "Prompt:",
                 "",
                 "```text",
@@ -1184,15 +1215,20 @@ def _write_external_imagegen_request(
         "provider": "codex_builtin_image2",
         "kind": kind,
         "module_id": module_id,
+        "request_path": str(request_path.expanduser().resolve()),
         "output_path": str(output.expanduser().resolve()),
         "prompt": prompt,
         "source_image": str(source_image_path) if source_image_path else "",
         "codex_image2_handoff": str(output.with_name("codex_image2_handoff.md").expanduser().resolve()),
-        "resume_instruction": "Generate the requested image, copy it to output_path, then rerun the same auto-scene command/workdir.",
+        "resume_instruction": "Generate the requested image with Codex image2, import or copy it to output_path, then rerun the same auto-scene command/workdir.",
+        "import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
+            f"--request {request_path.expanduser().resolve()} --image /path/to/codex-image2-output.png"
+        ),
         "instructions": [
             "Generate this image with the Codex imagegen/image2 skill, not a local model.",
             "Use source_image as visual context when it is provided; generate a new isolated standalone module image matching the prompt.",
-            "Copy the selected generated image to output_path.",
+            "Import the selected generated image with import_command, or copy it exactly to output_path.",
             "Then rerun this stage so the image can be returned to the multimodal agent for review.",
         ],
     }
@@ -1899,15 +1935,25 @@ def generate_module_references(
                 pending_requests.append(request)
         if pending_requests:
             batch_path = workdir / "modules" / "imagegen_batch_request.json"
+            import_parts = []
+            for index, item in enumerate(pending_requests, start=1):
+                key = str(item.get("module_id") or f"item_{index}")
+                import_parts.append(f"--image {key}=/path/to/codex-image2-output-{index}.png")
             batch_request = {
                 "type": "external_imagegen_batch_request",
                 "status": "awaiting_external_imagegen",
                 "provider": "codex_builtin_image2",
                 "kind": "module_reference_batch",
+                "request_path": str(batch_path.expanduser().resolve()),
                 "request_count": len(pending_requests),
                 "requests": pending_requests,
                 "codex_image2_handoff": str((workdir / "modules" / "codex_image2_batch_handoff.md").expanduser().resolve()),
-                "resume_instruction": "Generate every requested module image, copy each selected image to output_path, then rerun this auto-scene workdir.",
+                "resume_instruction": "Generate every requested module image with Codex image2, import or copy each selected image to output_path, then rerun this auto-scene workdir.",
+                "import_command": (
+                    "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
+                    f"--request {batch_path.expanduser().resolve()} "
+                    + " ".join(import_parts)
+                ),
             }
             _write_codex_image2_handoff(
                 handoff_path=Path(batch_request["codex_image2_handoff"]),
@@ -3722,25 +3768,40 @@ def _write_codex_image2_final_request(
             }
         )
     request_path = final_dir / "codex_image2_final_request.json"
-    write_manifest(
-        request_path,
-        {
-            "type": "codex_image2_final_render_request",
-            "kind": "final_render_batch",
-            "status": "awaiting_codex_image2",
-            "provider": "codex_builtin_image2",
-            "reference_policy": "white_model_position_locked",
-            "render_manifest": _absolute_artifact_path(render_manifest_path),
-            "request_count": len(requests),
-            "requests": requests,
-            "output_paths": [item["output_path"] for item in requests],
-            "instruction": (
-                "Use Codex built-in image2, not DashScope/Qwen image2 and not a local AI renderer. "
-                "For each request, provide the listed input images to image2; the white-model RGB is the position lock and the concept image is style-only. "
-                "Save each selected output exactly to output_path, then rerun the Auto Scene command."
-            ),
-        },
+    handoff_path = final_dir / "codex_image2_final_handoff.md"
+    import_parts = []
+    for index, item in enumerate(requests, start=1):
+        key = str(item.get("view_id") or f"view_{index}")
+        import_parts.append(f"--image {key}=/path/to/codex-image2-final-{index}.png")
+    request = {
+        "type": "codex_image2_final_render_request",
+        "kind": "final_render_batch",
+        "status": "awaiting_codex_image2",
+        "provider": "codex_builtin_image2",
+        "request_path": str(request_path.expanduser().resolve()),
+        "codex_image2_handoff": str(handoff_path.expanduser().resolve()),
+        "reference_policy": "white_model_position_locked",
+        "render_manifest": _absolute_artifact_path(render_manifest_path),
+        "request_count": len(requests),
+        "requests": requests,
+        "output_paths": [item["output_path"] for item in requests],
+        "import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
+            f"--request {request_path.expanduser().resolve()} "
+            + " ".join(import_parts)
+        ),
+        "instruction": (
+            "Use Codex built-in image2, not DashScope/Qwen image2 and not a local AI renderer. "
+            "For each request, provide the listed input images to image2; the white-model RGB is the position lock and the concept image is style-only. "
+            "Save each selected output exactly to output_path or import it with import_command, then rerun the Auto Scene command."
+        ),
+    }
+    _write_codex_image2_handoff(
+        handoff_path=handoff_path,
+        request=request,
+        batch_requests=requests,
     )
+    write_manifest(request_path, request)
     return request_path
 
 

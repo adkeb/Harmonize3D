@@ -594,6 +594,8 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["prompt"], "agent concept prompt")
             self.assertEqual(request["status"], "awaiting_external_imagegen")
             self.assertEqual(request["provider"], "codex_builtin_image2")
+            self.assertTrue(Path(request["request_path"]).is_absolute())
+            self.assertIn("auto-scene-import-image2", request["import_command"])
             self.assertNotIn("negative_prompt", request)
             self.assertTrue(Path(request["output_path"]).is_absolute())
             handoff = Path(request["codex_image2_handoff"])
@@ -602,6 +604,8 @@ class AutoSceneTest(unittest.TestCase):
             handoff_text = handoff.read_text(encoding="utf-8")
             self.assertIn("agent concept prompt", handoff_text)
             self.assertIn(request["output_path"], handoff_text)
+            self.assertIn(request["request_path"], handoff_text)
+            self.assertIn("auto-scene-import-image2", handoff_text)
             self.assertNotIn("negative_prompt", handoff_text)
 
     def test_concept_generation_can_use_dashscope_imagegen_file_provider(self) -> None:
@@ -764,12 +768,15 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["requests"][0]["source_image"], str(concept_output))
             self.assertEqual(batch["provider"], "codex_builtin_image2")
+            self.assertTrue(Path(batch["request_path"]).is_absolute())
+            self.assertIn("auto-scene-import-image2", batch["import_command"])
             handoff = Path(batch["codex_image2_handoff"])
             self.assertTrue(handoff.exists())
             handoff_text = handoff.read_text(encoding="utf-8")
             self.assertIn("strict orthographic front view", handoff_text)
             self.assertIn(str(concept_output), handoff_text)
             self.assertIn(batch["requests"][0]["output_path"], handoff_text)
+            self.assertIn("model_hero_object=/path/to/codex-image2-output-1.png", handoff_text)
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
 
             with (
@@ -972,11 +979,13 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["kind"], "module_reference")
             self.assertEqual(request["module_id"], "main_vehicle")
             self.assertEqual(request["provider"], "codex_builtin_image2")
+            self.assertIn("auto-scene-import-image2", request["import_command"])
             self.assertNotIn("negative_prompt", request)
             self.assertTrue(Path(request["codex_image2_handoff"]).exists())
             batch = read_manifest(root / "modules" / "imagegen_batch_request.json")
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["request_count"], 1)
+            self.assertIn("main_vehicle=/path/to/codex-image2-output-1.png", batch["import_command"])
             self.assertTrue(Path(batch["codex_image2_handoff"]).exists())
 
     def test_import_codex_image2_single_request_copies_and_marks_fulfilled(self) -> None:
@@ -1202,6 +1211,9 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["status"], "awaiting_codex_image2")
             self.assertEqual(request["provider"], "codex_builtin_image2")
             self.assertEqual(request["request_count"], 1)
+            self.assertTrue(Path(request["request_path"]).is_absolute())
+            self.assertTrue(Path(request["codex_image2_handoff"]).exists())
+            self.assertIn("auto-scene-import-image2", request["import_command"])
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
             item = request["requests"][0]
             self.assertTrue(Path(item["output_path"]).is_absolute())
@@ -1212,6 +1224,9 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("appearance_style_reference_only", roles)
             self.assertIn("exact geometry", item["prompt"])
             self.assertEqual(item["position_lock"]["primary_reference_role"], "white_model_rgb_position_lock")
+            handoff_text = Path(request["codex_image2_handoff"]).read_text(encoding="utf-8")
+            self.assertIn("white_model_rgb_position_lock", handoff_text)
+            self.assertIn("view_hero=/path/to/codex-image2-output-1.png", handoff_text)
 
     def test_blender_render_backend_writes_auto_scene_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
