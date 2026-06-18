@@ -185,6 +185,13 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2
   --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
 ```
 
+After a run advances past module generation, audit whether it actually followed the required model-planned Codex image2 flow:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-audit-image2-flow \
+  --workdir outputs/auto_scene/demo_showroom
+```
+
 Typical output layout:
 
 ```text

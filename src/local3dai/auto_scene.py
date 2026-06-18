@@ -1705,6 +1705,10 @@ def _valid_image(path: Path) -> bool:
     return True
 
 
+def _valid_model_artifact(path: Path) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size > 0 and path.suffix.lower() in {".glb", ".gltf", ".obj"}
+
+
 def _image2_import_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -1915,6 +1919,252 @@ def import_latest_codex_image2_results(
     summary["after_timestamp"] = after
     write_manifest(Path(summary["request_path"]).with_name("codex_image2_import.json"), summary)
     return summary
+
+
+def _read_manifest_or_empty(path: Path) -> dict[str, Any]:
+    try:
+        if path.exists():
+            return read_manifest(path)
+    except Exception:
+        return {}
+    return {}
+
+
+def _json_has_key(data: Any, key: str) -> bool:
+    if isinstance(data, dict):
+        return key in data or any(_json_has_key(value, key) for value in data.values())
+    if isinstance(data, list):
+        return any(_json_has_key(item, key) for item in data)
+    return False
+
+
+def _artifact_path_from_summary(workdir: Path, summary: dict[str, Any], key: str, fallback: str) -> Path:
+    value = str(summary.get(key) or "")
+    return Path(value).expanduser() if value else workdir / fallback
+
+
+def _audit_check(
+    checks: list[dict[str, Any]],
+    check_id: str,
+    passed: bool,
+    *,
+    evidence: dict[str, Any] | None = None,
+    reason: str = "",
+    required: bool = True,
+) -> None:
+    checks.append(
+        {
+            "id": check_id,
+            "status": "pass" if passed else "fail",
+            "required": required,
+            "reason": reason,
+            "evidence": evidence or {},
+        }
+    )
+
+
+def audit_auto_scene_image2_flow(
+    workdir: Path,
+    *,
+    require_codex_image2: bool = True,
+    require_hunyuan_3d: bool = True,
+    write_report_file: bool = True,
+) -> dict[str, Any]:
+    workdir = Path(workdir).expanduser().resolve()
+    summary_path = workdir / "auto_scene_summary.json"
+    summary = _read_manifest_or_empty(summary_path)
+    checks: list[dict[str, Any]] = []
+
+    planning = summary.get("planning") if isinstance(summary.get("planning"), dict) else {}
+    plan_source = str(planning.get("plan_source") or "")
+    planning_backend = str(planning.get("backend") or "")
+    _audit_check(
+        checks,
+        "scene_planner_model_owned",
+        plan_source in {"model_only", "existing_scene_planner_outputs"} and planning_backend in {"dashscope_multimodal", "resume_existing_artifacts"},
+        evidence={"backend": planning_backend, "model": planning.get("model", ""), "plan_source": plan_source},
+        reason="Real Auto Scene planning must come from qwen3.7-plus/DashScope or resumed model artifacts.",
+    )
+    _audit_check(
+        checks,
+        "rule_planning_disabled_for_real_run",
+        str(planning.get("rule_planning") or "") == "disabled_for_real_runs",
+        evidence={"rule_planning": planning.get("rule_planning", "")},
+        reason="Rule planning must not satisfy a real Auto Scene run.",
+    )
+
+    concept_plan_path = _artifact_path_from_summary(workdir, summary, "concept_image_plan", "concept/concept_image_plan.json")
+    concept_plan = _read_manifest_or_empty(concept_plan_path)
+    _audit_check(
+        checks,
+        "concept_prompt_from_model_exists",
+        bool(str(concept_plan.get("concept_prompt") or "").strip()),
+        evidence={"concept_image_plan": _absolute_artifact_path(concept_plan_path), "prompt_chars": len(str(concept_plan.get("concept_prompt") or ""))},
+        reason="The model must expand the user request into concept_image_plan.concept_prompt.",
+    )
+
+    concept_image_path = _artifact_path_from_summary(workdir, summary, "global_concept", "concept/global_concept.png")
+    concept_generation_path = concept_image_path.with_name("generation_manifest.json")
+    concept_generation = _read_manifest_or_empty(concept_generation_path)
+    concept_request = _read_manifest_or_empty(concept_image_path.with_name("imagegen_request.json"))
+    concept_source = str(concept_generation.get("image_source") or concept_generation.get("created_by") or "")
+    codex_like_sources = {"imagegen_skill_external", "image2_provided", "codex_builtin_image2", "codex_generated_images_latest_scan"}
+    concept_codex_ok = _valid_image(concept_image_path) and (
+        not require_codex_image2
+        or concept_source in codex_like_sources
+        or str(concept_request.get("provider") or "") == "codex_builtin_image2"
+    )
+    _audit_check(
+        checks,
+        "concept_image_codex_image2",
+        concept_codex_ok,
+        evidence={
+            "concept_image": _absolute_artifact_path(concept_image_path),
+            "valid_image": _valid_image(concept_image_path),
+            "created_by": concept_generation.get("created_by", ""),
+            "image_source": concept_generation.get("image_source", ""),
+            "request_provider": concept_request.get("provider", ""),
+        },
+        reason="The concept image must be provided by Codex image2/imported image2, not a local/mock/DashScope image generator.",
+    )
+    _audit_check(
+        checks,
+        "concept_no_negative_prompt",
+        not any(_json_has_key(data, "negative_prompt") for data in (concept_plan, concept_generation, concept_request)),
+        evidence={"concept_image_plan": _absolute_artifact_path(concept_plan_path), "generation_manifest": _absolute_artifact_path(concept_generation_path)},
+        reason="Concept generation constraints must be positive-prompt only.",
+    )
+
+    concept_review_path = _artifact_path_from_summary(workdir, summary, "concept_review", "concept/concept_review.json")
+    concept_review = _read_manifest_or_empty(concept_review_path)
+    _audit_check(
+        checks,
+        "concept_image_reviewed_by_model",
+        str(concept_review.get("backend") or "") == "dashscope_multimodal" and str(concept_review.get("status") or "").lower() == "pass",
+        evidence={"concept_review": _absolute_artifact_path(concept_review_path), "backend": concept_review.get("backend", ""), "status": concept_review.get("status", "")},
+        reason="The generated concept image must be returned to the multimodal model and pass review before module prompting.",
+    )
+
+    module_plan_path = _artifact_path_from_summary(workdir, summary, "module_plan", "modules/module_plan.json")
+    module_prompt_info_path = _artifact_path_from_summary(workdir, summary, "module_prompt_info", "modules/module_prompt_info.json")
+    module_plan = _read_manifest_or_empty(module_plan_path)
+    module_prompt_info = _read_manifest_or_empty(module_prompt_info_path)
+    modules = [module for module in module_plan.get("modules", []) if isinstance(module, dict)]
+    _audit_check(
+        checks,
+        "module_prompts_written_by_model",
+        bool(modules) and str(module_prompt_info.get("backend") or "") in {"dashscope_multimodal", "resume_existing_artifacts"},
+        evidence={"module_count": len(modules), "module_prompt_info": _absolute_artifact_path(module_prompt_info_path), "backend": module_prompt_info.get("backend", "")},
+        reason="The reviewed concept image must be returned to the model so it can write per-object prompts.",
+    )
+    _audit_check(
+        checks,
+        "module_plan_no_negative_prompt",
+        not _json_has_key(module_plan, "negative_prompt"),
+        evidence={"module_plan": _absolute_artifact_path(module_plan_path)},
+        reason="Module prompts must not include negative_prompt fields.",
+    )
+
+    reference_results: list[dict[str, Any]] = []
+    all_reference_ok = bool(modules)
+    all_reference_positive_only = True
+    for module in modules:
+        module_id = str(module.get("module_id") or "")
+        manifest_path = workdir / "modules" / module_id / "reference_manifest.json"
+        manifest = _read_manifest_or_empty(manifest_path)
+        reference_image = Path(str(manifest.get("reference_image") or workdir / "modules" / module_id / "reference.png"))
+        source = str(manifest.get("image_source") or manifest.get("created_by") or "")
+        ok = _valid_image(reference_image) and (not require_codex_image2 or source in codex_like_sources)
+        all_reference_ok = all_reference_ok and ok
+        positive_only = not _json_has_key(manifest, "negative_prompt")
+        all_reference_positive_only = all_reference_positive_only and positive_only
+        reference_results.append(
+            {
+                "module_id": module_id,
+                "reference_image": _absolute_artifact_path(reference_image),
+                "valid_image": _valid_image(reference_image),
+                "image_source": source,
+                "review_status": manifest.get("review_status", ""),
+                "positive_only": positive_only,
+                "pass": ok,
+            }
+        )
+    _audit_check(
+        checks,
+        "module_reference_images_codex_image2",
+        all_reference_ok,
+        evidence={"modules": reference_results},
+        reason="Every module reference image must come from Codex image2/imported image2 and be valid before 3D generation.",
+    )
+    _audit_check(
+        checks,
+        "module_reference_no_negative_prompt",
+        all_reference_positive_only,
+        evidence={"modules": reference_results},
+        reason="Module reference generation must be positive-prompt only.",
+    )
+
+    module_review_path = _artifact_path_from_summary(workdir, summary, "module_reference_review", "modules/module_reference_review.json")
+    module_review = _read_manifest_or_empty(module_review_path)
+    _audit_check(
+        checks,
+        "module_references_reviewed_by_model",
+        str(module_review.get("backend") or "") == "dashscope_multimodal" and str(module_review.get("status") or "").lower() == "pass",
+        evidence={"module_reference_review": _absolute_artifact_path(module_review_path), "backend": module_review.get("backend", ""), "status": module_review.get("status", "")},
+        reason="The generated module reference images must be returned to the multimodal model and pass review.",
+    )
+
+    asset_manifest_path = _artifact_path_from_summary(workdir, summary, "module_asset_manifest", "modules/module_asset_manifest.json")
+    asset_manifest = _read_manifest_or_empty(asset_manifest_path)
+    asset_results: list[dict[str, Any]] = []
+    all_assets_ok = bool(asset_manifest.get("modules"))
+    for asset in asset_manifest.get("modules", []) if isinstance(asset_manifest.get("modules"), list) else []:
+        if not isinstance(asset, dict):
+            continue
+        module_id = str(asset.get("module_id") or "")
+        metadata_path = Path(str(asset.get("metadata") or workdir / "modules" / module_id / "metadata.json"))
+        metadata = _read_manifest_or_empty(metadata_path)
+        model_path = Path(str(asset.get("model_path") or metadata.get("model_path") or ""))
+        created_by = str(metadata.get("created_by") or asset.get("sanity", {}).get("proxy_geometry") or "")
+        fallback_used = bool(asset.get("fallback_used") or asset.get("sanity", {}).get("fallback_used"))
+        ok = _valid_model_artifact(model_path) and (not require_hunyuan_3d or created_by == "hunyuan3d_2_1_shape_from_reviewed_reference") and not fallback_used
+        all_assets_ok = all_assets_ok and ok
+        asset_results.append(
+            {
+                "module_id": module_id,
+                "model_path": _absolute_artifact_path(model_path),
+                "metadata": _absolute_artifact_path(metadata_path),
+                "created_by": created_by,
+                "fallback_used": fallback_used,
+                "pass": ok,
+            }
+        )
+    _audit_check(
+        checks,
+        "reviewed_references_enter_3d_ai",
+        all_assets_ok,
+        evidence={"module_asset_manifest": _absolute_artifact_path(asset_manifest_path), "modules": asset_results},
+        reason="Reviewed module references must be handed to the configured 3D AI generator without procedural fallback.",
+    )
+
+    required_checks = [check for check in checks if check["required"]]
+    passed_count = sum(1 for check in required_checks if check["status"] == "pass")
+    report = {
+        "type": "auto_scene_image2_flow_audit",
+        "status": "pass" if passed_count == len(required_checks) else "fail",
+        "workdir": _absolute_artifact_path(workdir),
+        "summary": _absolute_artifact_path(summary_path),
+        "strict_requirements": {
+            "require_codex_image2": bool(require_codex_image2),
+            "require_hunyuan_3d": bool(require_hunyuan_3d),
+        },
+        "passed_required_checks": passed_count,
+        "required_checks": len(required_checks),
+        "checks": checks,
+    }
+    if write_report_file:
+        write_manifest(workdir / "reports" / "image2_flow_audit.json", report)
+    return report
 
 
 def generate_concept_image(

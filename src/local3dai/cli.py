@@ -9,7 +9,7 @@ from typing import Any
 
 from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
-from .auto_scene import AutoSceneOptions, import_codex_image2_result, import_latest_codex_image2_results, run_auto_scene
+from .auto_scene import AutoSceneOptions, audit_auto_scene_image2_flow, import_codex_image2_result, import_latest_codex_image2_results, run_auto_scene
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
@@ -334,6 +334,17 @@ def cmd_auto_scene_import_latest_image2(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_scene_audit_image2_flow(args: argparse.Namespace) -> int:
+    report = audit_auto_scene_image2_flow(
+        Path(args.workdir),
+        require_codex_image2=not args.allow_non_codex_image2,
+        require_hunyuan_3d=not args.allow_non_hunyuan_3d,
+        write_report_file=not args.no_write,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["status"] == "pass" or args.allow_fail else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load(args.config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -581,6 +592,14 @@ def build_parser() -> argparse.ArgumentParser:
     latest_image2_import.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
     latest_image2_import.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
     latest_image2_import.set_defaults(func=cmd_auto_scene_import_latest_image2)
+
+    image2_audit = subparsers.add_parser("auto-scene-audit-image2-flow", help="Audit whether an Auto Scene workdir followed the qwen -> Codex image2 -> model review -> 3D AI flow")
+    image2_audit.add_argument("--workdir", required=True, help="Auto Scene workdir containing auto_scene_summary.json")
+    image2_audit.add_argument("--allow-non-codex-image2", action="store_true", help="Do not fail references that came from non-Codex image generators")
+    image2_audit.add_argument("--allow-non-hunyuan-3d", action="store_true", help="Do not fail module assets that were not created by Hunyuan3D")
+    image2_audit.add_argument("--no-write", action="store_true", help="Print the audit without writing reports/image2_flow_audit.json")
+    image2_audit.add_argument("--allow-fail", action="store_true", help="Return exit code 0 even when the audit status is fail")
+    image2_audit.set_defaults(func=cmd_auto_scene_audit_image2_flow)
 
     auto_doctor = subparsers.add_parser("auto-doctor", help="Check Auto Agent Qwen planner runtime wiring")
     auto_doctor.add_argument("--config", default="configs/local.json")

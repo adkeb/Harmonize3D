@@ -15,6 +15,7 @@ from local3dai.auto_scene import (
     _module_reference_prompt_with_safety,
     _pending_external_imagegen_summary,
     apply_module_review_revisions,
+    audit_auto_scene_image2_flow,
     assemble_scene,
     call_model_scene_planner,
     create_concept_final_comparison,
@@ -1140,6 +1141,131 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(screen_output.exists())
             self.assertEqual(batch["status"], "fulfilled_by_codex_image2")
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
+
+    def test_audit_auto_scene_image2_flow_passes_strict_codex_hunyuan_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept = root / "concept" / "global_concept.png"
+            concept.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (90, 120, 200)).save(concept)
+            write_manifest(
+                root / "concept" / "concept_image_plan.json",
+                {"concept_prompt": "model-expanded concept prompt", "output": "concept/global_concept.png"},
+            )
+            write_manifest(
+                concept.with_name("generation_manifest.json"),
+                {"type": "concept_image_generation", "created_by": "imagegen_skill_external", "image_source": "imagegen_skill_external", "path": str(concept)},
+            )
+            write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {"provider": "codex_builtin_image2", "status": "fulfilled_by_codex_image2", "output_path": str(concept)},
+            )
+            write_manifest(
+                root / "concept" / "concept_review.json",
+                {"type": "concept_image_review", "backend": "dashscope_multimodal", "status": "pass"},
+            )
+            module_id = "main_vehicle"
+            reference = root / "modules" / module_id / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (230, 232, 238)).save(reference)
+            model_path = root / "modules" / module_id / "model.glb"
+            model_path.write_bytes(b"glTF test")
+            metadata_path = root / "modules" / module_id / "metadata.json"
+            write_manifest(
+                root / "modules" / "module_plan.json",
+                {
+                    "modules": [
+                        {
+                            "module_id": module_id,
+                            "role": "hero_object",
+                            "reference_prompt": "single object, strict orthographic front view, pure solid background",
+                            "generate_3d": True,
+                        }
+                    ]
+                },
+            )
+            write_manifest(root / "modules" / "module_prompt_info.json", {"backend": "dashscope_multimodal", "model": "qwen3.7-plus"})
+            write_manifest(
+                reference.with_name("reference_manifest.json"),
+                {
+                    "module_id": module_id,
+                    "reference_image": str(reference),
+                    "image_source": "imagegen_skill_external",
+                    "created_by": "imagegen_skill_external",
+                    "review_status": "pass",
+                    "source_image": str(concept),
+                },
+            )
+            write_manifest(
+                root / "modules" / "module_reference_review.json",
+                {"type": "module_reference_review", "backend": "dashscope_multimodal", "status": "pass", "failed_modules": []},
+            )
+            write_manifest(
+                metadata_path,
+                {"module_id": module_id, "model_path": str(model_path), "created_by": "hunyuan3d_2_1_shape_from_reviewed_reference", "source_reference": str(reference)},
+            )
+            write_manifest(
+                root / "modules" / "module_asset_manifest.json",
+                {
+                    "modules": [
+                        {
+                            "module_id": module_id,
+                            "model_path": str(model_path),
+                            "metadata": str(metadata_path),
+                            "fallback_used": False,
+                            "sanity": {"proxy_geometry": "hunyuan3d_2_1_shape_from_reviewed_reference", "fallback_used": False},
+                        }
+                    ]
+                },
+            )
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "type": "auto_scene_summary",
+                    "status": "needs_review",
+                    "planning": {"backend": "dashscope_multimodal", "model": "qwen3.7-plus", "plan_source": "model_only", "rule_planning": "disabled_for_real_runs"},
+                    "concept_image_plan": str(root / "concept" / "concept_image_plan.json"),
+                    "global_concept": str(concept),
+                    "concept_review": str(root / "concept" / "concept_review.json"),
+                    "module_plan": str(root / "modules" / "module_plan.json"),
+                    "module_prompt_info": str(root / "modules" / "module_prompt_info.json"),
+                    "module_reference_review": str(root / "modules" / "module_reference_review.json"),
+                    "module_asset_manifest": str(root / "modules" / "module_asset_manifest.json"),
+                },
+            )
+
+            report = audit_auto_scene_image2_flow(root)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["passed_required_checks"], report["required_checks"])
+            self.assertTrue((root / "reports" / "image2_flow_audit.json").exists())
+
+    def test_audit_auto_scene_image2_flow_fails_non_codex_reference_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept = root / "concept" / "global_concept.png"
+            concept.parent.mkdir(parents=True)
+            Image.new("RGB", (16, 16), (90, 120, 200)).save(concept)
+            write_manifest(root / "concept" / "concept_image_plan.json", {"concept_prompt": "prompt"})
+            write_manifest(concept.with_name("generation_manifest.json"), {"created_by": "dashscope_imagegen_reference_generation", "image_source": "dashscope_imagegen"})
+            write_manifest(root / "concept" / "concept_review.json", {"backend": "dashscope_multimodal", "status": "pass"})
+            write_manifest(root / "modules" / "module_plan.json", {"modules": []})
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "planning": {"backend": "dashscope_multimodal", "model": "qwen3.7-plus", "plan_source": "model_only", "rule_planning": "disabled_for_real_runs"},
+                    "concept_image_plan": str(root / "concept" / "concept_image_plan.json"),
+                    "global_concept": str(concept),
+                    "concept_review": str(root / "concept" / "concept_review.json"),
+                    "module_plan": str(root / "modules" / "module_plan.json"),
+                },
+            )
+
+            report = audit_auto_scene_image2_flow(root)
+            failed = {check["id"] for check in report["checks"] if check["status"] == "fail"}
+
+            self.assertEqual(report["status"], "fail")
+            self.assertIn("concept_image_codex_image2", failed)
 
     def test_import_codex_image2_final_request_maps_view_images(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
