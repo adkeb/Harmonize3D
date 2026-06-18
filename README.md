@@ -1,196 +1,289 @@
-# 本地 3D 到 AI 图像渲染流水线
+# Harmonize3D
 
-这个工程按 `计划.md` 搭好了一个本地脚本化系统：
+Harmonize3D is a local 3D-to-image rendering workbench. It starts from a real mesh, renders deterministic Blender structure channels, and lets an AI backend generate product-style images that are checked against the original 3D shape.
 
-1. Blender 批量渲染 3D 模型的 `RGB / Depth / Edge / Normal / Mask` 通道。
-2. AI 后端读取通道图生成候选图；当前默认使用 SDXL Base + Canny/Depth ControlNet，并用白模 `Mask/Edge/RGB` 做几何锁定。
-3. 一致性评分器按结构边缘和遮罩相似度排序，并复制最佳结果。
-4. `doctor` 自检会读取本机 GPU、Blender、Python 包和本地模型状态。
+The current direction is MeshLock-MV: a lightweight mesh-guided Agent for structure-adherent, multi-view AI rendering. The project does not treat the image model as the main invention; the main control layer is the explicit 3D mesh, locked camera, render channels, structure scoring, and multi-view selection loop around the model.
 
-当前机器已配置 RTX 5090 D 32GB、WSL2 Ubuntu 22.04、`uv`、官方 Blender 5.1.2，并在当前工程目录下保留了 Hunyuan3D 2.1、HiDream-O1-Image、SDXL/ControlNet 等本地权重路径。`mock` 后端仍可用于无 GPU 的快速回归验证。
+## Paper And Latest Results
 
-## 快速开始
+Latest paper artifact: [`reports/论文.docx`](reports/%E8%AE%BA%E6%96%87.docx).
+
+The paper has been updated with the June 18, 2026 Auto Scene run. This run validates the full modular chain:
+
+```text
+concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
+```
+
+Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333` and multiview score of `0.789947`. The final image still fails the concept/final check on `white_hero_presence`, exposing the next engineering targets: flatter-screen mesh sanity checks, concept-aligned camera search, and stricter final-render adherence to the Blender white-model position.
+
+![Latest module references](docs/paper_assets/module_references_contact.png)
+
+![Latest concept vs white model vs final](docs/paper_assets/concept_vs_final.png)
+
+![Latest final contact sheet](docs/paper_assets/final_contact_sheet.png)
+
+## What It Does
+
+1. Render a mesh through Blender into `rgb`, `depth`, `edge`, `normal`, `mask`, and `skeleton` channels.
+2. Generate AI candidates from model-derived channels only.
+3. Score candidates with `structure_v2`, which combines silhouette IoU, edge chamfer alignment, added-part penalties, roughness, and background cleanliness.
+4. Run the Agent across a locked anchor view and optional left/right views, then choose the best structure and multi-view consistency combination.
+5. Produce inspectable artifacts such as `agent_report.json`, `final.png`, `white_vs_final.png`, and multi-view contact sheets.
+
+## Quick Check
 
 ```bash
 cd /root/sakura/work/Harmonize3D
-bash scripts/bootstrap_core.sh
-source .venv/bin/activate
-local3dai doctor --scan-models
-local3dai run --prompt "cyberpunk fox figurine, glossy enamel, studio product lighting" --backend mock
+.venv/bin/python -m pytest -q
 ```
 
-不创建虚拟环境也可以临时这样跑：
+CPU-safe smoke test:
 
 ```bash
-PYTHONPATH=src python3 -m local3dai.cli run \
-  --prompt "cyberpunk fox figurine, glossy enamel, studio product lighting" \
-  --backend mock
-```
+PYTHONPATH=src .venv/bin/python -m local3dai.cli sample-renders \
+  --output outputs/sample_renders \
+  --views 3 \
+  --resolution 128
 
-## 使用真实 3D 模型
-
-官方 Blender 已安装在 `tools/blender-5.1.2-linux-x64/blender`，配置文件也已指向它。以后如果要重装或升级，可运行：
-
-```bash
-bash scripts/install_blender_official.sh
-```
-
-可以先生成或接入一个 3D 模型：
-
-```bash
-local3dai generate-3d \
-  --prompt "cyberpunk fox figurine" \
-  --backend sample \
-  --output outputs/generated_models/fox.obj
-```
-
-要接 Hunyuan3D、TRELLIS 等本地工具，把 `configs/local.json` 的 `model_generation.external_command` 设成你本机命令模板，模板里可用 `{prompt}` 和 `{output}`，然后运行 `--backend external`。
-
-把 `.glb/.gltf/.obj` 放到 `models/` 或任意本地路径：
-
-```bash
-local3dai render --model models/my_model.glb --output outputs/my_model/renders
-local3dai ai-render \
-  --input-renders outputs/my_model/renders/manifest.json \
-  --output outputs/my_model/candidates \
-  --prompt "photorealistic product render, crisp studio light" \
-  --backend mock
-local3dai score \
-  --input-renders outputs/my_model/renders/manifest.json \
-  --input-candidates outputs/my_model/candidates/manifest.json \
-  --output outputs/my_model/score
-```
-
-## Agent 自动调优渲染
-
-Agent v1 会在已有白模通道上渐进式调优提示词、参考通道、seed 和 guidance。默认只使用 `rgb + edge` 作为 HiDream-O1-Image 参考，禁用容易放大噪点的 `depth/normal`，先跑单视图，达标后再扩展到 3 视图一致性检查。
-
-```bash
-local3dai agent-render \
-  --input-renders outputs/my_model/renders/manifest.json \
-  --output outputs/my_model/agent \
-  --prompt "premium red concept sports car, clean studio product render" \
-  --model-key hidream_o1_image_full \
-  --target-view view_05 \
-  --max-generations 10
-```
-
-CPU/快速测试可使用 mock：
-
-```bash
-local3dai sample-renders --output outputs/sample_renders --views 4 --resolution 128
-local3dai agent-render \
+PYTHONPATH=src .venv/bin/python -m local3dai.cli agent-render \
   --input-renders outputs/sample_renders/manifest.json \
   --output outputs/sample_agent \
   --prompt "premium red concept sports car, clean studio product render" \
   --backend mock \
+  --max-generations 3
+```
+
+## Auto Agent Mode
+
+Auto Agent Mode turns one natural-language request into the full controlled pipeline: task expansion, camera planning, mesh generation or loading, Blender channel rendering, AI candidate search, structure scoring, visual judgement, and final packaging.
+
+CPU-safe smoke test:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-run \
+  --request "生成一辆未来感白色电动跑车，做三张产品图" \
+  --source-mode procedural \
+  --views 3 \
+  --quality fast \
+  --geometry strict \
+  --style product \
+  --backend mock \
+  --candidates 1 \
+  --max-retries 0 \
+  --dry-run \
+  --output outputs/auto_smoke
+```
+
+The run writes `auto_task.json`, `prompt_plan.json`, `camera_plan.json`, `mesh/metadata.json`, `mesh/sanity.json`, `reports/tool_calls.json`, `reports/visual_judgement.json`, `reports/agent_report.json`, `reports/scores.json`, `final/final.png`, `final/white_vs_final.png`, and `final/contact_sheet.png`.
+
+The planner uses an OpenAI-compatible Qwen service. The default configuration points to DashScope `qwen3.7-plus`; credentials and endpoint overrides are loaded from project `.env`:
+
+```bash
+DASHSCOPE_API_KEY=...
+H3D_AGENT_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+H3D_AGENT_LLM_MODEL=qwen3.7-plus
+```
+
+Check planner connectivity:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor
+```
+
+Optional local vLLM helpers for the previous NVFP4 planner model are still available:
+
+```bash
+scripts/download_qwen36_agent_model_direct.sh
+scripts/start_qwen36_agent_service.sh
+```
+
+The local download helper defaults to `/root/sakura/models/Qwen3.6-35B-A3B-NVFP4`. The start helper mounts `/root/sakura/models` into the vLLM container and automatically uses that local directory when `config.json` exists; otherwise vLLM resolves the model ID through `HF_ENDPOINT=https://hf-mirror.com` with proxy variables removed.
+
+For local-model wiring diagnostics:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor --allow-not-ready
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor --check-hf-mirror --allow-not-ready
+```
+
+The agent exposes controlled tool execution through a fixed local tool list and records every call in `reports/tool_calls.json`. Visual judgement is a required packaging gate; it checks final pixels, comparison/contact-sheet images, structure scores, and multi-view consistency before declaring `complete`, `needs_review`, or `failed`.
+
+## Auto Scene Mode
+
+Auto Scene Mode extends the one-object flow into modular scene generation. It expands one request into `scene_plan.json`, `module_plan.json`, a global concept image, per-module reference images, module GLBs, `scene_assembly.json`, an assembled `final_scene.glb`, scene render channels, module scoring, and final geometry-locked AI outputs.
+
+Mock end-to-end run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene \
+  --request "生成一个未来汽车发布会展台，中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面，输出三张产品级渲染图。" \
+  --output outputs/auto_scene/demo_showroom \
+  --views 3 \
+  --quality fast \
+  --geometry strict \
+  --style exhibition \
+  --backend mock \
+  --candidates 1 \
+  --max-retries 0 \
+  --dry-run \
+  --no-llm
+```
+
+Blender render smoke run with mock AI output:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene \
+  --request "生成一个未来汽车发布会展台，中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面，输出三张产品级渲染图。" \
+  --output outputs/auto_scene/demo_showroom \
+  --views 3 \
+  --quality fast \
+  --geometry strict \
+  --style exhibition \
+  --backend mock \
+  --candidates 1 \
+  --max-retries 0 \
+  --no-llm \
+  --render-backend blender
+```
+
+Web/API entry:
+
+```text
+POST /api/auto-scene
+GET  /api/auto-scene/{task_id}
+```
+
+The planner model is loaded from `.env` through the OpenAI-compatible Aliyun Bailian settings (`H3D_AGENT_LLM_BASE_URL`, `H3D_AGENT_LLM_MODEL`, `DASHSCOPE_API_KEY`). Mock mode can skip the LLM with `--no-llm`; real planner mode uses the configured model but still keeps concept and module reference images out of the final AI render inputs. If `concept/global_concept.png` or `modules/<module_id>/reference.png` already exists in the workdir, Auto Scene preserves that image2 asset and records it as `image2_provided` instead of replacing it with the fallback preview generator.
+
+Typical output layout:
+
+```text
+outputs/auto_scene/<task>/
+  auto_task.json
+  scene_plan.json
+  concept/concept_image_plan.json
+  concept/global_concept.png
+  modules/module_plan.json
+  modules/module_asset_manifest.json
+  modules/<module_id>/reference.png
+  modules/<module_id>/model.glb
+  scene/scene_assembly.json
+  scene/final_scene.glb
+  scene/scene_preview.png
+  cameras/camera_plan.json
+  renders/render_manifest.json
+  final/final_view_hero.png
+  final/final_view_left_30.png
+  final/final_view_right_30.png
+  final/contact_sheet.png
+  reports/module_scores.json
+  reports/agent_report.json
+```
+
+## Default Local Setup
+
+The checked-in local config is tuned for this workstation:
+
+- Blender: `tools/blender-5.1.2-linux-x64/blender`
+- Default image backend: `flux2-klein`
+- Default Agent model key: `flux2_klein_4b`
+- Default score version: `structure_v2`
+- Default Agent views: `view_locked`, `view_left_30`, `view_right_30`
+- Default Agent reference channels: `rgb`, `edge`, `depth`, `normal`, `mask`, `skeleton`
+
+Use `mock` for fast regression tests and UI checks. Use the real configured backends only when the local model weights and GPU environment are ready.
+
+## Main CLI Commands
+
+Render an existing mesh:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli render \
+  --model examples/sample_model.obj \
+  --output outputs/sample_model/renders \
+  --views 3 \
+  --resolution 512
+```
+
+Run Agent rendering from a render manifest:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli agent-render \
+  --input-renders outputs/sample_model/renders/manifest.json \
+  --output outputs/sample_model/agent \
+  --prompt "premium graphite and white hypercar material, clean studio product render" \
+  --backend mock \
   --max-generations 4
 ```
 
-Agent 输出包括 `agent_report.json`、`agent_trials/`、`final.png`、`white_vs_final.png`，通过 3 视图检查时还会生成 `three_view_contact.png`。
-
-或一条命令：
+Run the full scripted workflow:
 
 ```bash
-local3dai run \
-  --model models/my_model.glb \
+PYTHONPATH=src .venv/bin/python -m local3dai.cli run \
+  --model examples/sample_model.obj \
   --prompt "photorealistic product render, crisp studio light" \
-  --backend mock
-```
-
-工程内带了一个验证用模型：
-
-```bash
-local3dai run \
-  --generate-model \
-  --prompt "premium faceted figurine, clean studio product render" \
   --backend mock \
-  --workdir outputs/full_model_check
+  --workdir outputs/workflow_smoke
 ```
 
-## 接入 FLUX / SD 本地权重
+## Web Workbench
 
-先安装核心环境，再安装 CUDA 13.0 PyTorch wheel 和 Diffusers：
+Start the local web app:
 
 ```bash
-bash scripts/bootstrap_core.sh
-bash scripts/install_ai_cuda130.sh
+PYTHONPATH=src .venv/bin/python -m local3dai.webapp --host 127.0.0.1 --port 7866
 ```
 
-然后编辑 `configs/local.json`：
-
-```json
-{
-  "ai": {
-    "default_backend": "diffusers-flux"
-  },
-  "models": {
-    "flux_schnell": {
-      "local_path": "/absolute/path/to/FLUX.1-schnell"
-    }
-  }
-}
-```
-
-运行：
-
-```bash
-local3dai run \
-  --model models/my_model.glb \
-  --prompt "premium studio product image, sharp focus, consistent geometry" \
-  --backend sdxl-controlnet-geometry \
-  --model-key sdxl_controlnet_geometry \
-  --geometry-lock
-```
-
-## Web 控制台
-
-本工程带了一个本地分阶段工作台，不再只是启动一条黑盒流水线。用户可以先用提示词、参考图或已有模型载入 3D 白模，在浏览器中直接拖转、缩放、平移模型，固定当前视角，然后后端按这个视角渲染 `RGB / Depth / Edge / Normal / Mask` 白模通道，最后根据用户输入的最终提示词生成白模/成图对照。
-
-```bash
-cd /root/sakura/work/Harmonize3D
-source .venv/bin/activate
-local3dai-web --host 127.0.0.1 --port 7866
-```
-
-然后打开：
+Open:
 
 ```text
 http://127.0.0.1:7866
 ```
 
-工作台主路径：
+The workbench supports staged operation:
 
-1. `生成或载入 3D 白模`：支持提示词生成 3D、图片生成 3D、已有模型路径和程序化测试模型。
-2. `固定 3D 视角`：Three.js 本地 viewer 支持拖转、缩放、平移、前/侧/后/45 度视角和固定当前相机。
-3. `渲染白模通道`：调用 Blender 的 `view_locked` 单视角通道渲染。
-4. `AI 渲染成图`：使用固定视角白模 manifest 生成最终图、对照图和 Agent report。
+1. Load or generate a 3D white model.
+2. Inspect the model in Three.js and lock the current camera.
+3. Render Blender white-model channels for that locked view.
+4. Generate the final AI render and comparison artifacts.
 
-对应阶段 API：
+For an automated UI smoke test, run the server and then:
 
-- `POST /api/stage/3d`
-- `POST /api/stage/white-render`
-- `POST /api/stage/ai-render`
+```bash
+H3D_VALIDATE_AI_BACKEND=mock node scripts/validate_web_workbench.mjs
+node scripts/validate_auto_agent_web.mjs
+node scripts/validate_auto_agent_api.mjs
+```
 
-旧的 `/api/run` 和 CLI 一键流程仍保留，用于脚本化或回归验证。
+## Z-Image Research Path
 
-## 目录
+The repo contains experimental Z-Image staged ControlNet scripts and reports. The local non-turbo Z-Image plus lite ControlNet path has been validated as loadable, but direct single-view outputs are not yet good enough to become the default Agent backend. Keep it as a candidate generator and keep direct-vs-final reporting enabled.
 
-- `src/local3dai/cli.py`：统一 CLI。
-- `src/local3dai/webapp.py`：本地 Web 控制台和任务 API。
-- `src/local3dai/workflow.py`：Hunyuan3D/Blender/AI 渲染/评分的可复用工作流。
-- `src/local3dai/agent.py`：Agent v1 自动调优策略、图像质量指标和报告输出。
-- `blender_scripts/batch_render.py`：Blender 后台多视角多通道渲染。
-- `src/local3dai/ai/backends.py`：`mock`、普通 Diffusers、SDXL ControlNet 几何约束图像后端。
-- `src/local3dai/ai/geometry.py`：白模几何锁定和对照图工具。
-- `src/local3dai/scoring.py`：结构一致性评分和最佳图复制。
-- `configs/local.json`：按本机 RTX 5090 D/WSL2 生成的默认配置。
+Useful entry points:
 
-## 产物
+- `scripts/probe_zimage_staged_control.py`
+- `scripts/probe_zimage_i2l_lora.py`
+- `scripts/run_zimage_i2l_img2img_triview.py`
+- `reports/zimage_meshlock_validation_20260614.md`
+- `reports/dual_image_staged_weight_research_20260613.md`
 
-每次 `run` 会在 `outputs/run-YYYYMMDD-HHMMSS/` 下生成：
+## Project Layout
 
-- `renders/manifest.json`：每个视角的通道图索引。
-- `candidates/manifest.json`：AI 候选图索引。
-- `score/report.json`：候选排序分数。
-- `score/ranked/`：复制出的最佳图。
+- `src/local3dai/agent.py`: MeshLock Agent search, scoring, multi-view selection, and report output.
+- `src/local3dai/scoring_v2.py`: structure-adherence scoring.
+- `src/local3dai/ai/backends.py`: mock, Diffusers, SDXL ControlNet, Flux2 Klein, and HiDream backend adapters.
+- `src/local3dai/ai/geometry.py`: mesh position/detail/adaptive/quality lock compositing helpers.
+- `src/local3dai/workflow.py`: reusable end-to-end workflow.
+- `src/local3dai/webapp.py`: staged local API and web workbench server.
+- `blender_scripts/batch_render.py`: Blender channel rendering.
+- `web/`: static Three.js workbench UI.
+- `reports/`: technical reports and validation notes.
+
+## Reports
+
+The current technical report artifacts live under `reports/`, including:
+
+- `reports/Harmonize3D_Technical_Report.pdf`
+- `reports/harmonize3d_technical_report_content.json`
+- `reports/flux2_staged_weight_matrix_20260613.md`
+- `reports/zimage_meshlock_validation_20260614.md`
