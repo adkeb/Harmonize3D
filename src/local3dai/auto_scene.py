@@ -14,7 +14,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
@@ -1653,6 +1653,125 @@ def _valid_image(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _image2_import_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _codex_image2_request_keys(item: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for key in ("module_id", "view_id", "kind"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            keys.append(value)
+    output_path = str(item.get("output_path") or item.get("output") or "").strip()
+    if output_path:
+        keys.append(output_path)
+        resolved = str(Path(output_path).expanduser().resolve())
+        if resolved not in keys:
+            keys.append(resolved)
+    return keys
+
+
+def _resolve_image2_import_source(
+    item: dict[str, Any],
+    *,
+    image_path: Path | None,
+    image_mappings: Mapping[str, Path | str],
+    allow_single_image: bool,
+) -> Path:
+    if image_path is not None and allow_single_image:
+        return image_path
+    for key in _codex_image2_request_keys(item):
+        if key in image_mappings:
+            return Path(image_mappings[key])
+    label = ", ".join(_codex_image2_request_keys(item)) or str(item.get("output_path") or "unknown request")
+    raise ValueError(f"No image supplied for Codex image2 request item: {label}")
+
+
+def _copy_codex_image2_result(source: Path, output_path: str) -> dict[str, str]:
+    source = Path(source).expanduser()
+    if not _valid_image(source):
+        raise ValueError(f"Codex image2 result is not a valid image: {source}")
+    source = source.resolve()
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if source != output:
+        shutil.copy2(source, output)
+    if not _valid_image(output):
+        raise ValueError(f"Imported Codex image2 output is not a valid image: {output}")
+    return {"source_image": str(source), "output_path": str(output)}
+
+
+def import_codex_image2_result(
+    request_path: Path,
+    *,
+    image_path: Path | None = None,
+    image_mappings: Mapping[str, Path | str] | None = None,
+) -> dict[str, Any]:
+    """Copy Codex image2 outputs into the request-declared output paths."""
+    request_path = Path(request_path).expanduser().resolve()
+    request = read_manifest(request_path)
+    mappings = dict(image_mappings or {})
+    if image_path is None and not mappings:
+        raise ValueError("Provide an image path for a single request or keyed mappings for a batch request.")
+
+    raw_items = request.get("requests")
+    items: list[dict[str, Any]]
+    if isinstance(raw_items, list) and raw_items:
+        items = [item for item in raw_items if isinstance(item, dict)]
+    else:
+        items = [request]
+    if not items:
+        raise ValueError(f"No Codex image2 request items found in: {request_path}")
+    allow_single_image = len(items) == 1 and image_path is not None
+    if len(items) > 1 and image_path is not None and not mappings:
+        raise ValueError("Batch Codex image2 imports require keyed mappings such as module_id=/path/to/image.png.")
+
+    imported_at = _image2_import_timestamp()
+    imports: list[dict[str, Any]] = []
+    for item in items:
+        output_path = str(item.get("output_path") or item.get("output") or "").strip()
+        if not output_path:
+            raise ValueError(f"Codex image2 request item is missing output_path in: {request_path}")
+        source = _resolve_image2_import_source(
+            item,
+            image_path=image_path,
+            image_mappings=mappings,
+            allow_single_image=allow_single_image,
+        )
+        copied = _copy_codex_image2_result(source, output_path)
+        item["status"] = "fulfilled_by_codex_image2"
+        item["imported_at"] = imported_at
+        item["imported_image"] = copied["source_image"]
+        item["fulfilled_output_path"] = copied["output_path"]
+        imports.append(
+            {
+                "module_id": item.get("module_id", ""),
+                "view_id": item.get("view_id", ""),
+                "kind": item.get("kind") or item.get("type") or "",
+                **copied,
+            }
+        )
+
+    request["status"] = "fulfilled_by_codex_image2"
+    request["fulfilled_at"] = imported_at
+    request["import_count"] = len(imports)
+    import_manifest_path = request_path.with_name("codex_image2_import.json")
+    request["import_manifest"] = str(import_manifest_path)
+    write_manifest(request_path, request)
+    summary = {
+        "type": "codex_image2_import",
+        "status": "complete",
+        "request_path": str(request_path),
+        "request_kind": request.get("kind") or request.get("type") or "",
+        "imported_at": imported_at,
+        "import_count": len(imports),
+        "imports": imports,
+    }
+    write_manifest(import_manifest_path, summary)
+    return summary
 
 
 def generate_concept_image(

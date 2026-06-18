@@ -168,6 +168,16 @@ GET  /api/auto-scene/{task_id}
 
 The planner model is loaded from `.env` through the OpenAI-compatible Aliyun Bailian settings (`H3D_AGENT_LLM_BASE_URL`, `H3D_AGENT_LLM_MODEL`, `DASHSCOPE_API_KEY`). Mock mode can skip the LLM with `--no-llm`; real planner mode uses the configured model but still keeps concept and module reference images out of the final AI render inputs. If `concept/global_concept.png` or `modules/<module_id>/reference.png` already exists in the workdir, Auto Scene preserves that image2 asset and records it as `image2_provided` instead of replacing it with the fallback preview generator.
 
+When `reference_generation.provider` is `external_imagegen`, real Auto Scene runs stop at a Codex image2 handoff instead of using a local image fallback. The request JSON declares the exact `output_path`; after generating with Codex built-in image2, import the selected image back into the workdir:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json \
+  --image /path/to/codex-image2-concept.png
+```
+
+For module or final-render batches, pass keyed images such as `--image main_vehicle=/path/to/car.png` or `--image view_hero=/path/to/final.png`, then rerun the same `auto-scene` command. The handoff and import path do not use negative prompts.
+
 Typical output layout:
 
 ```text

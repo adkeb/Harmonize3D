@@ -22,6 +22,7 @@ from local3dai.auto_scene import (
     generate_model_module_plan,
     generate_module_assets,
     generate_module_references,
+    import_codex_image2_result,
     module_failure_policy,
     module_presence_score,
     plan_scene_layout,
@@ -977,6 +978,109 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["request_count"], 1)
             self.assertTrue(Path(batch["codex_image2_handoff"]).exists())
+
+    def test_import_codex_image2_single_request_copies_and_marks_fulfilled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "generated" / "concept.png"
+            source.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (20, 80, 180)).save(source)
+            output = root / "concept" / "global_concept.png"
+            request_path = write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {
+                    "type": "external_imagegen_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "concept",
+                    "output_path": str(output),
+                    "prompt": "global concept prompt",
+                },
+            )
+
+            summary = import_codex_image2_result(request_path, image_path=source)
+
+            self.assertEqual(summary["status"], "complete")
+            self.assertEqual(summary["import_count"], 1)
+            self.assertTrue(output.exists())
+            with Image.open(output) as imported:
+                self.assertEqual(imported.size, (32, 32))
+            request = read_manifest(request_path)
+            self.assertEqual(request["status"], "fulfilled_by_codex_image2")
+            self.assertEqual(request["fulfilled_output_path"], str(output.resolve()))
+            self.assertTrue(Path(request["import_manifest"]).exists())
+            self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
+
+    def test_import_codex_image2_batch_maps_module_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            car_source = root / "generated" / "car.png"
+            screen_source = root / "generated" / "screen.png"
+            car_source.parent.mkdir(parents=True)
+            Image.new("RGB", (24, 24), (240, 240, 245)).save(car_source)
+            Image.new("RGB", (24, 24), (30, 70, 120)).save(screen_source)
+            car_output = root / "modules" / "main_vehicle" / "reference.png"
+            screen_output = root / "modules" / "display_screen" / "reference.png"
+            batch_path = write_manifest(
+                root / "modules" / "imagegen_batch_request.json",
+                {
+                    "type": "external_imagegen_batch_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "module_reference_batch",
+                    "requests": [
+                        {"kind": "module_reference", "module_id": "main_vehicle", "output_path": str(car_output)},
+                        {"kind": "module_reference", "module_id": "display_screen", "output_path": str(screen_output)},
+                    ],
+                },
+            )
+
+            summary = import_codex_image2_result(
+                batch_path,
+                image_mappings={"main_vehicle": car_source, "display_screen": screen_source},
+            )
+
+            self.assertEqual(summary["import_count"], 2)
+            self.assertTrue(car_output.exists())
+            self.assertTrue(screen_output.exists())
+            batch = read_manifest(batch_path)
+            self.assertEqual(batch["status"], "fulfilled_by_codex_image2")
+            self.assertTrue(all(item["status"] == "fulfilled_by_codex_image2" for item in batch["requests"]))
+            self.assertEqual(batch["requests"][0]["fulfilled_output_path"], str(car_output.resolve()))
+            self.assertEqual(batch["requests"][1]["fulfilled_output_path"], str(screen_output.resolve()))
+            self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
+
+    def test_import_codex_image2_final_request_maps_view_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            final_source = root / "generated" / "view_hero.png"
+            final_source.parent.mkdir(parents=True)
+            Image.new("RGB", (40, 28), (180, 190, 210)).save(final_source)
+            output = root / "final" / "view_hero.png"
+            request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "status": "awaiting_codex_image2",
+                    "provider": "codex_builtin_image2",
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "output_path": str(output),
+                            "prompt": "render final image using white model position lock",
+                        }
+                    ],
+                },
+            )
+
+            summary = import_codex_image2_result(request_path, image_mappings={"view_hero": final_source})
+
+            self.assertEqual(summary["request_kind"], "codex_image2_final_render_request")
+            self.assertTrue(output.exists())
+            request = read_manifest(request_path)
+            self.assertEqual(request["status"], "fulfilled_by_codex_image2")
+            self.assertEqual(request["requests"][0]["fulfilled_output_path"], str(output.resolve()))
+            self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
 
     def test_module_references_can_use_dashscope_imagegen_file_provider(self) -> None:
         import threading

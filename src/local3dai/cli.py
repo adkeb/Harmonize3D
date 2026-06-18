@@ -9,7 +9,7 @@ from typing import Any
 
 from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
-from .auto_scene import AutoSceneOptions, run_auto_scene
+from .auto_scene import AutoSceneOptions, import_codex_image2_result, run_auto_scene
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
@@ -294,6 +294,34 @@ def cmd_auto_scene(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_image2_import_args(values: list[str]) -> tuple[Path | None, dict[str, Path]]:
+    image_path: Path | None = None
+    mappings: dict[str, Path] = {}
+    for value in values:
+        if "=" in value:
+            key, raw_path = value.split("=", 1)
+            key = key.strip()
+            if not key:
+                raise ValueError(f"Invalid image mapping: {value}")
+            mappings[key] = Path(raw_path)
+        else:
+            if image_path is not None:
+                raise ValueError("Only one unkeyed --image path is allowed. Use key=/path mappings for batch requests.")
+            image_path = Path(value)
+    return image_path, mappings
+
+
+def cmd_auto_scene_import_image2(args: argparse.Namespace) -> int:
+    image_path, mappings = _parse_image2_import_args(args.image or [])
+    summary = import_codex_image2_result(
+        Path(args.request),
+        image_path=image_path,
+        image_mappings=mappings,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load(args.config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -523,6 +551,16 @@ def build_parser() -> argparse.ArgumentParser:
     auto_scene.add_argument("--render-backend", default="auto", choices=["auto", "procedural", "blender"], help="Render assembled scene channels with auto, procedural, or Blender backend")
     auto_scene.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
     auto_scene.set_defaults(func=cmd_auto_scene)
+
+    image2_import = subparsers.add_parser("auto-scene-import-image2", help="Import Codex image2 outputs into an Auto Scene pending request")
+    image2_import.add_argument("--request", required=True, help="Path to imagegen_request.json, imagegen_batch_request.json, or codex_image2_final_request.json")
+    image2_import.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="Image path for a single request, or key=/path for a batch. Keys can be module_id, view_id, kind, or output_path.",
+    )
+    image2_import.set_defaults(func=cmd_auto_scene_import_image2)
 
     auto_doctor = subparsers.add_parser("auto-doctor", help="Check Auto Agent Qwen planner runtime wiring")
     auto_doctor.add_argument("--config", default="configs/local.json")
