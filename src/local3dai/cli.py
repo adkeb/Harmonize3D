@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
+from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
+from .auto_scene import AutoSceneOptions, run_auto_scene
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
@@ -35,6 +37,14 @@ def _model_ref(config: dict[str, Any], model_key: str | None) -> str:
     if not model:
         return ""
     return model.get("local_path") or model.get("model_id") or ""
+
+
+def _parse_channels(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    if not value.strip():
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -117,18 +127,20 @@ def cmd_render(args: argparse.Namespace) -> int:
 def cmd_ai_render(args: argparse.Namespace) -> int:
     config = _load(args.config)
     ai_cfg = config["ai"]
-    model_cfg = _model_config(config, args.model_key)
+    model_key = args.model_key or ai_cfg.get("default_model_key")
+    model_cfg = _model_config(config, model_key)
     backend_name = args.backend or model_cfg.get("backend") or ai_cfg["default_backend"]
     backend = build_backend(backend_name)
+    reference_channels = _parse_channels(args.reference_channels)
     manifest = backend.generate(
         args.input_renders,
         args.output,
         prompt=args.prompt,
         candidates_per_view=args.candidates or int(ai_cfg["candidates_per_view"]),
         seed=args.seed if args.seed is not None else int(ai_cfg["seed"]),
-        model_ref=args.model_ref or _model_ref(config, args.model_key),
+        model_ref=args.model_ref or _model_ref(config, model_key),
         device=args.device or ai_cfg["device"],
-        dtype=args.dtype or ai_cfg["dtype"],
+        dtype=args.dtype or model_cfg.get("dtype") or ai_cfg["dtype"],
         variant=args.variant if args.variant is not None else model_cfg.get("variant") or ai_cfg.get("variant"),
         steps=args.steps if args.steps is not None else int(ai_cfg["steps"]),
         guidance_scale=args.guidance_scale if args.guidance_scale is not None else float(ai_cfg["guidance_scale"]),
@@ -139,6 +151,8 @@ def cmd_ai_render(args: argparse.Namespace) -> int:
         height=args.ai_height if args.ai_height is not None else int(model_cfg.get("height", ai_cfg.get("height", 1536))),
         canny_scale=args.canny_scale if args.canny_scale is not None else float(model_cfg.get("canny_scale", 2.85)),
         depth_scale=args.depth_scale if args.depth_scale is not None else float(model_cfg.get("depth_scale", 0.55)),
+        control_channels=list(model_cfg.get("control_channels", ["canny", "depth"])),
+        reference_channels=reference_channels if reference_channels is not None else list(model_cfg.get("reference_channels", [])),
         control_only=args.control_only if args.control_only is not None else bool(model_cfg.get("control_only", True)),
         geometry_lock=args.geometry_lock if args.geometry_lock is not None else bool(model_cfg.get("geometry_lock", True)),
     )
@@ -157,6 +171,8 @@ def cmd_score(args: argparse.Namespace) -> int:
         mask_weight=float(score_cfg["mask_weight"]),
         prompt_weight=float(score_cfg["prompt_weight"]),
         copy_top_k=args.top_k or int(score_cfg["copy_top_k"]),
+        version=str(score_cfg.get("version", "legacy")),
+        structure_weights=dict(score_cfg.get("structure_v2", {})),
     )
     print(summarize_report(report))
     print(f"Wrote score report: {report}")
@@ -166,21 +182,26 @@ def cmd_score(args: argparse.Namespace) -> int:
 def cmd_agent_render(args: argparse.Namespace) -> int:
     config = _load(args.config)
     agent_cfg = config.get("agent", {})
+    model_key = args.model_key or agent_cfg.get("default_model_key") or config["ai"].get("default_model_key")
     report = run_agent_render(
         AgentRunOptions(
             input_renders=Path(args.input_renders),
             output_dir=Path(args.output),
             prompt=args.prompt,
             config_path=Path(args.config),
-            model_key=args.model_key or "hidream_o1_image_full",
+            model_key=model_key,
             backend=args.backend,
             model_ref=args.model_ref,
-            target_view=args.target_view or str(agent_cfg.get("target_view", "view_05")),
+            target_view=args.target_view or str(agent_cfg.get("target_view", "view_locked")),
             max_generations=args.max_generations or int(agent_cfg.get("max_generations", 10)),
             seed=args.seed if args.seed is not None else int(config["ai"].get("seed", 20260610)),
             expand_views=bool(args.expand_views),
-            expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_01", "view_05", "view_06"])),
-            default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge"])),
+            expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_locked", "view_left_30", "view_right_30"])),
+            default_reference_channels=tuple(
+                _parse_channels(args.reference_channels)
+                if args.reference_channels is not None
+                else agent_cfg.get("default_reference_channels", ["rgb", "edge", "depth", "normal", "mask", "skeleton"])
+            ),
             experimental_reference_channels=tuple(agent_cfg.get("experimental_reference_channels", [])),
             pass_threshold=float(agent_cfg.get("pass_threshold", 0.62)),
             roughness_weight=float(agent_cfg.get("roughness_weight", 0.25)),
@@ -201,6 +222,78 @@ def cmd_agent_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_run(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    workdir = Path(args.output or Path(config["paths"]["outputs_dir"]) / "auto" / f"auto-{timestamp}")
+    summary = run_auto_agent(
+        AutoRunOptions(
+            request=args.request,
+            output_dir=workdir,
+            config_path=Path(args.config),
+            source_mode=args.source_mode,
+            model_path=Path(args.model_path) if args.model_path else None,
+            reference_image=Path(args.reference_image) if args.reference_image else None,
+            output_views=args.views,
+            quality_mode=args.quality,
+            geometry_mode=args.geometry,
+            style_preset=args.style,
+            backend_model_key=args.model_key,
+            backend=args.backend,
+            num_candidates_per_view=args.candidates,
+            max_retries=args.max_retries,
+            seed=args.seed,
+            dry_run=bool(args.dry_run or args.backend == "mock"),
+            use_llm=not args.no_llm,
+        )
+    )
+    print(json.dumps({"status": summary["status"], "workdir": summary["workdir"], "auto_summary": str(workdir / "auto_summary.json")}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_auto_doctor(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    status = qwen_runtime_status(config, check_hf_mirror=args.check_hf_mirror, timeout=args.timeout)
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+    return 0 if status["ready"] or args.allow_not_ready else 2
+
+
+def cmd_auto_scene(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    workdir = Path(args.output or Path(config["paths"]["outputs_dir"]) / "auto_scene" / f"scene-{timestamp}")
+    summary = run_auto_scene(
+        AutoSceneOptions(
+            request=args.request,
+            output_dir=workdir,
+            config_path=Path(args.config),
+            output_views=args.views,
+            quality_mode=args.quality,
+            geometry_mode=args.geometry,
+            style_preset=args.style,
+            backend_model_key=args.model_key,
+            backend=args.backend,
+            num_candidates_per_view=args.candidates,
+            max_retries=args.max_retries,
+            seed=args.seed,
+            allow_procedural_fallback=bool(args.allow_procedural_fallback),
+            require_concept_confirmation=bool(args.require_concept_confirmation),
+            dry_run=bool(args.dry_run or args.backend == "mock"),
+            use_llm=not args.no_llm,
+            render_backend=args.render_backend,
+            hero_model_path=Path(args.hero_model) if args.hero_model else None,
+        )
+    )
+    print(
+        json.dumps(
+            {"status": summary["status"], "workdir": summary["workdir"], "auto_scene_summary": str(workdir / "auto_scene_summary.json")},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load(args.config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -208,7 +301,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     renders_dir = workdir / "renders"
     ai_dir = workdir / "candidates"
     score_dir = workdir / "score"
-    model_cfg = _model_config(config, args.model_key)
+    model_key = args.model_key or config["ai"].get("default_model_key")
+    model_cfg = _model_config(config, model_key)
     backend = args.backend or model_cfg.get("backend") or config["ai"]["default_backend"]
     model_path = args.model
 
@@ -245,15 +339,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             resolution=args.resolution or min(512, int(config["render"]["resolution"])),
         )
 
+    reference_channels = _parse_channels(args.reference_channels)
     ai_manifest = build_backend(backend).generate(
         render_manifest,
         ai_dir,
         prompt=args.prompt,
         candidates_per_view=args.candidates or int(config["ai"]["candidates_per_view"]),
         seed=args.seed if args.seed is not None else int(config["ai"]["seed"]),
-        model_ref=args.model_ref or _model_ref(config, args.model_key),
+        model_ref=args.model_ref or _model_ref(config, model_key),
         device=args.device or config["ai"]["device"],
-        dtype=args.dtype or config["ai"]["dtype"],
+        dtype=args.dtype or model_cfg.get("dtype") or config["ai"]["dtype"],
         variant=args.variant if args.variant is not None else model_cfg.get("variant") or config["ai"].get("variant"),
         steps=args.steps or int(config["ai"]["steps"]),
         guidance_scale=args.guidance_scale if args.guidance_scale is not None else float(config["ai"]["guidance_scale"]),
@@ -264,6 +359,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         height=args.ai_height if args.ai_height is not None else int(model_cfg.get("height", config["ai"].get("height", 1536))),
         canny_scale=args.canny_scale if args.canny_scale is not None else float(model_cfg.get("canny_scale", 2.85)),
         depth_scale=args.depth_scale if args.depth_scale is not None else float(model_cfg.get("depth_scale", 0.55)),
+        control_channels=list(model_cfg.get("control_channels", ["canny", "depth"])),
+        reference_channels=reference_channels if reference_channels is not None else list(model_cfg.get("reference_channels", [])),
         control_only=args.control_only if args.control_only is not None else bool(model_cfg.get("control_only", True)),
         geometry_lock=args.geometry_lock if args.geometry_lock is not None else bool(model_cfg.get("geometry_lock", True)),
     )
@@ -275,6 +372,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         mask_weight=float(config["score"]["mask_weight"]),
         prompt_weight=float(config["score"]["prompt_weight"]),
         copy_top_k=args.top_k or int(config["score"]["copy_top_k"]),
+        version=str(config["score"].get("version", "legacy")),
+        structure_weights=dict(config["score"].get("structure_v2", {})),
     )
     summary = {
         "workdir": str(workdir),
@@ -345,6 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
     ai_render.add_argument("--guidance-scale", type=float)
     ai_render.add_argument("--strength", type=float)
     ai_render.add_argument("--negative-prompt")
+    ai_render.add_argument("--reference-channels", help="Comma-separated Flux2 Klein reference channels; empty string means text-only")
     ai_render.add_argument("--ai-width", type=int)
     ai_render.add_argument("--ai-height", type=int)
     ai_render.add_argument("--canny-scale", type=float)
@@ -367,7 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_render.add_argument("--output", required=True)
     agent_render.add_argument("--prompt", required=True)
     agent_render.add_argument("--backend", help="Override configured AI backend, e.g. mock for CPU tests")
-    agent_render.add_argument("--model-key", default="hidream_o1_image_full")
+    agent_render.add_argument("--model-key")
     agent_render.add_argument("--model-ref")
     agent_render.add_argument("--target-view", default=None)
     agent_render.add_argument("--max-generations", type=int)
@@ -379,9 +479,57 @@ def build_parser() -> argparse.ArgumentParser:
     agent_render.add_argument("--variant")
     agent_render.add_argument("--steps", type=int)
     agent_render.add_argument("--negative-prompt")
+    agent_render.add_argument("--reference-channels", help="Comma-separated Agent reference channels; empty string means text-only")
     agent_render.add_argument("--ai-width", type=int)
     agent_render.add_argument("--ai-height", type=int)
     agent_render.set_defaults(func=cmd_agent_render)
+
+
+    auto_run = subparsers.add_parser("auto-run", help="Run one-sentence Auto Agent Mode")
+    auto_run.add_argument("--request", required=True, help="Natural language rendering request")
+    auto_run.add_argument("--output", help="Output workdir, defaults to outputs/auto/auto-<timestamp>")
+    auto_run.add_argument("--source-mode", default="auto", choices=["auto", "text_to_3d", "image_to_3d", "existing_model", "model_path", "procedural"])
+    auto_run.add_argument("--model-path")
+    auto_run.add_argument("--reference-image")
+    auto_run.add_argument("--views", type=int, default=3)
+    auto_run.add_argument("--quality", default="balanced", choices=["fast", "balanced", "high"])
+    auto_run.add_argument("--geometry", default="strict", choices=["loose", "balanced", "strict"])
+    auto_run.add_argument("--style", default="product", choices=["product", "cinematic", "ecommerce", "concept", "clay_to_material"])
+    auto_run.add_argument("--model-key")
+    auto_run.add_argument("--backend", help="Use mock for dry CPU validation")
+    auto_run.add_argument("--candidates", type=int, default=3)
+    auto_run.add_argument("--max-retries", type=int, default=2)
+    auto_run.add_argument("--seed", type=int, default=20260610)
+    auto_run.add_argument("--dry-run", action="store_true", help="Use sample mesh, synthetic render channels, and mock backend")
+    auto_run.add_argument("--no-llm", action="store_true", help="Skip Qwen planner and use deterministic rule planner")
+    auto_run.set_defaults(func=cmd_auto_run)
+
+    auto_scene = subparsers.add_parser("auto-scene", help="Run modular Auto Scene Mode")
+    auto_scene.add_argument("--request", required=True, help="Natural language scene request")
+    auto_scene.add_argument("--output", help="Output workdir, defaults to outputs/auto_scene/scene-<timestamp>")
+    auto_scene.add_argument("--views", type=int, default=3)
+    auto_scene.add_argument("--quality", default="balanced", choices=["fast", "balanced", "high"])
+    auto_scene.add_argument("--geometry", default="strict", choices=["loose", "balanced", "strict"])
+    auto_scene.add_argument("--style", default="exhibition", choices=["product", "cinematic", "ecommerce", "concept", "exhibition", "architecture"])
+    auto_scene.add_argument("--model-key")
+    auto_scene.add_argument("--backend", help="Use mock for dry CPU validation")
+    auto_scene.add_argument("--candidates", type=int, default=3)
+    auto_scene.add_argument("--max-retries", type=int, default=2)
+    auto_scene.add_argument("--seed", type=int, default=20260610)
+    auto_scene.add_argument("--allow-procedural-fallback", action="store_true", default=True)
+    auto_scene.add_argument("--require-concept-confirmation", action="store_true")
+    auto_scene.add_argument("--dry-run", action="store_true", help="Use mock image, 3D, render, and AI backends")
+    auto_scene.add_argument("--no-llm", action="store_true", help="Only for dry-run/mock validation; real Auto Scene requires the configured multimodal planner")
+    auto_scene.add_argument("--render-backend", default="auto", choices=["auto", "procedural", "blender"], help="Render assembled scene channels with auto, procedural, or Blender backend")
+    auto_scene.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
+    auto_scene.set_defaults(func=cmd_auto_scene)
+
+    auto_doctor = subparsers.add_parser("auto-doctor", help="Check Auto Agent Qwen planner runtime wiring")
+    auto_doctor.add_argument("--config", default="configs/local.json")
+    auto_doctor.add_argument("--check-hf-mirror", action="store_true", help="Probe optional hf-mirror.com model metadata when local model fields are configured")
+    auto_doctor.add_argument("--timeout", type=float, default=2.0)
+    auto_doctor.add_argument("--allow-not-ready", action="store_true", help="Return exit code 0 even when the Qwen planner service is not ready")
+    auto_doctor.set_defaults(func=cmd_auto_doctor)
 
     run = subparsers.add_parser("run", help="Run the full pipeline")
     run.add_argument("--prompt", required=True)
@@ -400,6 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--guidance-scale", type=float)
     run.add_argument("--strength", type=float)
     run.add_argument("--negative-prompt")
+    run.add_argument("--reference-channels", help="Comma-separated Flux2 Klein reference channels; empty string means text-only")
     run.add_argument("--ai-width", type=int)
     run.add_argument("--ai-height", type=int)
     run.add_argument("--canny-scale", type=float)

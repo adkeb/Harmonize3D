@@ -37,17 +37,18 @@ class WorkflowOptions:
     ai_height: int = 1536
     candidates: int = 1
     seed: int = 20260610
-    steps: int = 42
-    guidance_scale: float = 8.0
+    steps: int = 4
+    guidance_scale: float = 1.0
     canny_scale: float = 2.85
     depth_scale: float = 0.55
     geometry_lock: bool = True
     negative_prompt: str = ""
-    model_key: str = "sdxl_controlnet_geometry"
+    model_key: str = "flux2_klein_4b"
     agent_render: bool = False
     agent_max_generations: int = 10
-    agent_target_view: str = "view_05"
+    agent_target_view: str = "view_locked"
     agent_expand_views: bool = True
+    camera: dict[str, Any] | None = None
 
 
 def _direct_download_env() -> dict[str, str]:
@@ -163,6 +164,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         if not model_path.exists():
             raise RuntimeError(f"Default white mesh was not found: {model_path}")
     emit("source", f"3D source ready: {model_path}", 0.24)
+    emit("mesh_check", f"Mesh source passed existence check: {model_path}", 0.26)
 
     emit("render", "Rendering white model channels in Blender", 0.31)
     render_cfg = config["render"]
@@ -177,6 +179,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         engine=render_cfg["engine"],
         samples=options.render_samples or int(render_cfg["samples"]),
         camera_distance=float(render_cfg["camera_distance"]),
+        camera=options.camera,
     )
 
     if options.agent_render:
@@ -188,13 +191,13 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
                 output_dir=workdir / "agent",
                 prompt=options.prompt,
                 config_path=options.config_path,
-                model_key=options.model_key or "hidream_o1_image_full",
-                target_view=options.agent_target_view or str(agent_cfg.get("target_view", "view_05")),
+                model_key=options.model_key or str(agent_cfg.get("default_model_key", config["ai"].get("default_model_key", "flux2_klein_4b"))),
+                target_view=options.agent_target_view or str(agent_cfg.get("target_view", "view_locked")),
                 max_generations=options.agent_max_generations or int(agent_cfg.get("max_generations", 10)),
                 seed=options.seed,
                 expand_views=options.agent_expand_views,
-                expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_01", "view_05", "view_06"])),
-                default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge"])),
+                expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_locked", "view_left_30", "view_right_30"])),
+                default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge", "depth", "normal", "mask", "skeleton"])),
                 experimental_reference_channels=tuple(agent_cfg.get("experimental_reference_channels", [])),
                 pass_threshold=float(agent_cfg.get("pass_threshold", 0.62)),
                 roughness_weight=float(agent_cfg.get("roughness_weight", 0.25)),
@@ -257,7 +260,8 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         model_ref=model_cfg.get("local_path") or "",
         model_config=model_cfg,
         device=config["ai"].get("device", "cuda:0"),
-        dtype=config["ai"].get("dtype", "float16"),
+        dtype=model_cfg.get("dtype") or config["ai"].get("dtype", "bfloat16"),
+        reference_channels=list(model_cfg.get("reference_channels", [])),
         variant=model_cfg.get("variant") or config["ai"].get("variant"),
         steps=options.steps,
         guidance_scale=options.guidance_scale,
@@ -266,6 +270,7 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         height=options.ai_height,
         canny_scale=options.canny_scale,
         depth_scale=options.depth_scale,
+        control_channels=list(model_cfg.get("control_channels", ["canny", "depth"])),
         control_only=bool(model_cfg.get("control_only", True)),
         geometry_lock=options.geometry_lock,
     )
@@ -280,6 +285,8 @@ def run_workflow(options: WorkflowOptions, progress: Progress | None = None) -> 
         mask_weight=float(score_cfg["mask_weight"]),
         prompt_weight=float(score_cfg["prompt_weight"]),
         copy_top_k=int(score_cfg["copy_top_k"]),
+        version=str(score_cfg.get("version", "legacy")),
+        structure_weights=dict(score_cfg.get("structure_v2", {})),
     )
     best_image = _best_ranked_image(score_report)
     final_image = workdir / "final.png"

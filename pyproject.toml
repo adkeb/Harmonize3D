@@ -9,6 +9,7 @@ description = "Local 3D to AI image rendering pipeline for Blender channels, scr
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "dashscope>=1.25",
   "numpy>=1.24",
   "pillow>=10.0",
   "opencv-python>=4.8",

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import cgi
+from email.parser import BytesParser
+from email.policy import default as email_policy
 import json
 import mimetypes
 import os
@@ -52,6 +53,8 @@ if __name__ == "__main__":
     _maybe_reexec_configured_python()
 
 from .agent import AgentRunOptions, run_agent_render
+from .auto_agent import AUTO_STAGE_IDS, AutoRunOptions, qwen_runtime_status, run_auto_agent
+from .auto_scene import AUTO_SCENE_STAGE_IDS, AutoSceneOptions, run_auto_scene
 from .ai.backends import build_backend
 from .ai.geometry import create_comparison_image
 from .camera import CameraState
@@ -95,6 +98,9 @@ def _stage_state(stage_id: str) -> dict[str, Any]:
         "message": "",
         "logs": [],
         "artifacts": {},
+        "warnings": [],
+        "error": "",
+        "retry_count": 0,
     }
 
 
@@ -136,6 +142,7 @@ def _mark_stage_artifacts(job: dict[str, Any], summary: dict[str, Any]) -> None:
             "final_image": summary.get("final_image", ""),
             "comparison_image": summary.get("comparison_image", ""),
             "three_view_contact": summary.get("three_view_contact", ""),
+            "multiview_contact_sheet": summary.get("multiview_contact_sheet", ""),
         },
         "ai": {"ai_manifest": summary.get("ai_manifest", "")},
         "score": {
@@ -163,6 +170,107 @@ def _mark_stage_artifacts(job: dict[str, Any], summary: dict[str, Any]) -> None:
         stages[stage_id]["artifacts"].update(clean)
 
 
+def _mark_auto_stage_artifacts(job: dict[str, Any], summary: dict[str, Any]) -> None:
+    stage_artifacts: dict[str, dict[str, str]] = {
+        "understand": {
+            "auto_summary": str(Path(summary.get("workdir", "")) / "auto_summary.json") if summary.get("workdir") else "",
+            "tool_calls": summary.get("tool_calls", ""),
+        },
+        "expand": {"auto_task": summary.get("auto_task", ""), "prompt_plan": summary.get("prompt_plan", "")},
+        "plan": {"camera_plan": summary.get("camera_plan", "")},
+        "source": {"model_path": summary.get("model_path", ""), "mesh_metadata": summary.get("mesh_metadata", "")},
+        "mesh_check": {"mesh_sanity": summary.get("mesh_sanity", "")},
+        "camera": {"camera_plan": summary.get("camera_plan", "")},
+        "render": {"render_manifest": summary.get("render_manifest", "")},
+        "agent": {
+            "agent_report": summary.get("agent_report", ""),
+            "final_image": summary.get("final_image", ""),
+            "comparison_image": summary.get("comparison_image", ""),
+            "contact_sheet": summary.get("contact_sheet", ""),
+        },
+        "score": {"scores": summary.get("scores", ""), "multiview_score": summary.get("multiview_score", "")},
+        "retry": {"tool_calls": summary.get("tool_calls", "")},
+        "package": {
+            "final_image": summary.get("final_image", ""),
+            "comparison_image": summary.get("comparison_image", ""),
+            "contact_sheet": summary.get("contact_sheet", ""),
+            "visual_judgement": summary.get("visual_judgement", ""),
+            "run_log": summary.get("run_log", ""),
+        },
+        "complete": {
+            "auto_summary": str(Path(summary.get("workdir", "")) / "auto_summary.json") if summary.get("workdir") else "",
+            "visual_judgement": summary.get("visual_judgement", ""),
+        },
+    }
+    stages = _stage_map(job)
+    for stage_id, artifacts in stage_artifacts.items():
+        if stage_id not in stages:
+            continue
+        clean = {key: value for key, value in artifacts.items() if value}
+        clean.update(
+            {
+                f"{key}_url": _file_url(value)
+                for key, value in clean.items()
+                if Path(str(value)).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".json"}
+            }
+        )
+        stages[stage_id]["artifacts"].update(clean)
+
+
+def _mark_auto_scene_stage_artifacts(job: dict[str, Any], summary: dict[str, Any]) -> None:
+    stage_artifacts: dict[str, dict[str, str]] = {
+        "understand": {"auto_task": summary.get("auto_task", ""), "tool_calls": summary.get("tool_calls", "")},
+        "concept": {
+            "concept_image_plan": summary.get("concept_image_plan", ""),
+            "global_concept": summary.get("global_concept", ""),
+        },
+        "decompose": {"scene_plan": summary.get("scene_plan", ""), "module_plan": summary.get("module_plan", "")},
+        "module_reference": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
+        "module_3d": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
+        "module_check": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
+        "layout": {"scene_assembly": summary.get("scene_assembly", "")},
+        "scene_preview": {
+            "scene_model_path": summary.get("scene_model_path", ""),
+            "scene_preview": summary.get("scene_preview", ""),
+            "final_scene_manifest": summary.get("final_scene_manifest", ""),
+        },
+        "camera": {"camera_plan": summary.get("camera_plan", "")},
+        "render": {"render_manifest": summary.get("render_manifest", "")},
+        "agent": {"agent_report": summary.get("agent_report", "")},
+        "score": {
+            "module_scores": summary.get("module_scores", ""),
+            "structure_scores": summary.get("structure_scores", ""),
+            "multiview_score": summary.get("multiview_score", ""),
+        },
+        "consistency": {"multiview_score": summary.get("multiview_score", "")},
+        "package": {
+            "final_image": summary.get("final_image", ""),
+            "comparison_image": summary.get("comparison_image", ""),
+            "contact_sheet": summary.get("contact_sheet", ""),
+            "visual_judgement": summary.get("visual_judgement", ""),
+            "run_log": summary.get("run_log", ""),
+        },
+        "complete": {
+            "auto_scene_summary": str(Path(summary.get("workdir", "")) / "auto_scene_summary.json") if summary.get("workdir") else "",
+            "visual_judgement": summary.get("visual_judgement", ""),
+            "contact_sheet": summary.get("contact_sheet", ""),
+        },
+    }
+    stages = _stage_map(job)
+    for stage_id, artifacts in stage_artifacts.items():
+        if stage_id not in stages:
+            continue
+        clean = {key: value for key, value in artifacts.items() if value}
+        clean.update(
+            {
+                f"{key}_url": _file_url(value)
+                for key, value in clean.items()
+                if Path(str(value)).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".json", ".glb"}
+            }
+        )
+        stages[stage_id]["artifacts"].update(clean)
+
+
 def _json_response(handler: BaseHTTPRequestHandler, data: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
     body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     handler.send_response(status)
@@ -178,6 +286,25 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def _read_multipart_upload(handler: BaseHTTPRequestHandler, field_name: str = "file") -> tuple[str, bytes] | None:
+    content_type = handler.headers.get("Content-Type", "")
+    length = int(handler.headers.get("Content-Length", "0") or "0")
+    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    message = BytesParser(policy=email_policy).parsebytes(header + handler.rfile.read(length))
+    if message.get_content_type() != "multipart/form-data" or not message.get_boundary():
+        raise StageError("multipart/form-data required", status=HTTPStatus.BAD_REQUEST)
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        if part.get_param("name", header="content-disposition") != field_name:
+            continue
+        filename = part.get_filename()
+        if not filename:
+            return None
+        return filename, part.get_payload(decode=True) or b""
+    return None
 
 
 def _is_safe_path(path: Path) -> bool:
@@ -205,6 +332,17 @@ def _read_json_file(path: str | Path) -> dict[str, Any]:
         return json.loads(candidate.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _parse_channels(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value)
+    if not text.strip():
+        return []
+    return [item.strip() for item in text.split(",") if item.strip()]
 
 
 def _timestamped_dir(prefix: str) -> Path:
@@ -327,6 +465,51 @@ def _generate_hidream_reference(
     return output
 
 
+def _generate_prompt_reference(
+    *,
+    config: dict[str, Any],
+    prompt: str,
+    output: Path,
+    seed: int,
+    width: int = 1024,
+    height: int = 1024,
+    model_key: str | None = None,
+) -> Path:
+    ref_cfg = config.get("reference_generation", {})
+    selected_key = model_key or ref_cfg.get("default_model_key") or "flux2_klein_4b"
+    model = dict(_model_cfg(config, selected_key))
+    backend_name = model.get("backend", "")
+    if backend_name == "hidream-o1-image":
+        if not model.get("enabled", False):
+            raise RuntimeError(f"Prompt reference model is disabled: {selected_key}")
+        return _generate_hidream_reference(
+            config=config,
+            prompt=prompt,
+            output=output,
+            seed=seed,
+            width=width,
+            height=height,
+        )
+    backend = build_backend(backend_name)
+    generate_reference = getattr(backend, "generate_reference", None)
+    if not callable(generate_reference):
+        raise RuntimeError(f"Backend {backend_name!r} cannot generate prompt reference images.")
+    return generate_reference(
+        output,
+        prompt=prompt,
+        seed=seed,
+        model_ref=model.get("local_path") or model.get("model_path") or model.get("model_id", ""),
+        negative_prompt=model.get("negative_prompt", ""),
+        device=config.get("ai", {}).get("device", "cuda:0"),
+        dtype=model.get("dtype") or config.get("ai", {}).get("dtype", "bfloat16"),
+        variant=model.get("variant") or config.get("ai", {}).get("variant"),
+        steps=int(model.get("steps", 4)),
+        guidance_scale=float(model.get("guidance_scale", 0.0)),
+        width=width or int(model.get("width", 1024)),
+        height=height or int(model.get("height", 1024)),
+    )
+
+
 def _run_hunyuan_shape_for_stage(
     *,
     config: dict[str, Any],
@@ -438,30 +621,31 @@ def _stage_generate_3d(payload: dict[str, Any]) -> dict[str, Any]:
         metadata = str(metadata_path)
     elif source_mode == "prompt_3d":
         try:
-            reference_path = _generate_hidream_reference(
+            reference_path = _generate_prompt_reference(
                 config=config,
                 prompt=prompt,
                 output=workdir / "prompt_reference.png",
                 seed=seed,
                 width=int(payload.get("reference_width") or 1024),
                 height=int(payload.get("reference_height") or 1024),
+                model_key=payload.get("reference_model_key"),
             )
         except subprocess.CalledProcessError as exc:
             raise StageError(
-                f"HiDream reference image generation failed with exit code {exc.returncode}.",
+                f"Prompt reference image generation failed with exit code {exc.returncode}.",
                 stage="3d",
                 source_mode=source_mode,
-                error_type="hidream_reference_failed",
+                error_type="prompt_reference_failed",
                 returncode=exc.returncode,
                 workdir=str(workdir),
                 memory=_memory_snapshot(),
             ) from exc
         except Exception as exc:
             raise StageError(
-                f"HiDream reference image generation failed: {exc}",
+                f"Prompt reference image generation failed: {exc}",
                 stage="3d",
                 source_mode=source_mode,
-                error_type="hidream_reference_failed",
+                error_type="prompt_reference_failed",
                 workdir=str(workdir),
                 memory=_memory_snapshot(),
             ) from exc
@@ -595,19 +779,26 @@ def _stage_ai_render(payload: dict[str, Any]) -> dict[str, Any]:
 
     if agent_render:
         agent_cfg = config.get("agent", {})
+        model_key = payload.get("model_key") or agent_cfg.get("default_model_key") or config["ai"].get("default_model_key", "flux2_klein_4b")
+        model_cfg = dict(_model_cfg(config, model_key))
         summary = run_agent_render(
             AgentRunOptions(
                 input_renders=render_manifest,
                 output_dir=workdir / "agent",
                 prompt=prompt,
                 config_path=ROOT / "configs/local.json",
-                model_key=payload.get("model_key") or "hidream_o1_image_full",
+                model_key=model_key,
+                backend=payload.get("backend") or None,
                 target_view="view_locked",
                 max_generations=int(payload.get("max_generations") or agent_cfg.get("max_generations", 10)),
                 seed=seed,
-                expand_views=bool(payload.get("expand_views", False)),
-                expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_locked"])),
-                default_reference_channels=tuple(agent_cfg.get("default_reference_channels", ["rgb", "edge"])),
+                expand_views=bool(payload.get("expand_views", True)),
+                expand_view_ids=tuple(agent_cfg.get("expand_view_ids", ["view_locked", "view_left_30", "view_right_30"])),
+                default_reference_channels=tuple(
+                    _parse_channels(payload.get("reference_channels"))
+                    if "reference_channels" in payload
+                    else agent_cfg.get("default_reference_channels", ["rgb", "edge", "depth", "normal", "mask", "skeleton"])
+                ),
                 experimental_reference_channels=tuple(agent_cfg.get("experimental_reference_channels", [])),
                 pass_threshold=float(agent_cfg.get("pass_threshold", 0.62)),
                 roughness_weight=float(agent_cfg.get("roughness_weight", 0.25)),
@@ -615,9 +806,9 @@ def _stage_ai_render(payload: dict[str, Any]) -> dict[str, Any]:
                 mask_weight=float(agent_cfg.get("mask_weight", 0.25)),
                 background_weight=float(agent_cfg.get("background_weight", 0.15)),
                 negative_prompt=negative_prompt,
-                steps=int(payload.get("steps") or config["models"]["hidream_o1_image_full"].get("steps", 50)),
-                width=int(payload.get("width") or config["models"]["hidream_o1_image_full"].get("width", 2048)),
-                height=int(payload.get("height") or config["models"]["hidream_o1_image_full"].get("height", 2048)),
+                steps=int(payload.get("steps") or model_cfg.get("steps", config["ai"].get("steps", 4))),
+                width=int(payload.get("width") or model_cfg.get("width", config["ai"].get("width", 1024))),
+                height=int(payload.get("height") or model_cfg.get("height", config["ai"].get("height", 1024))),
             )
         )
         return {
@@ -632,10 +823,13 @@ def _stage_ai_render(payload: dict[str, Any]) -> dict[str, Any]:
             "comparison_image_url": _file_url(summary["comparison_image"]),
             "agent_report": summary["agent_report"],
             "agent_report_url": _file_url(summary["agent_report"]),
+            "multiview_contact_sheet": summary.get("multiview_contact_sheet", ""),
+            "multiview_contact_sheet_url": _file_url(summary["multiview_contact_sheet"]) if summary.get("multiview_contact_sheet") else "",
+            "final_view_images": summary.get("final_view_images", {}),
             "summary": summary,
         }
 
-    model_key = payload.get("model_key") or "sdxl_controlnet_geometry"
+    model_key = payload.get("model_key") or config["ai"].get("default_model_key", "flux2_klein_4b")
     model_cfg = dict(_model_cfg(config, model_key))
     backend_name = payload.get("backend") or model_cfg.get("backend") or config["ai"]["default_backend"]
     ai_manifest = build_backend(backend_name).generate(
@@ -648,15 +842,21 @@ def _stage_ai_render(payload: dict[str, Any]) -> dict[str, Any]:
         model_ref=model_cfg.get("local_path") or model_cfg.get("model_path") or "",
         model_config=model_cfg,
         device=config["ai"].get("device", "cuda:0"),
-        dtype=config["ai"].get("dtype", "float16"),
+        dtype=model_cfg.get("dtype") or config["ai"].get("dtype", "bfloat16"),
         variant=model_cfg.get("variant") or config["ai"].get("variant"),
-        steps=int(payload.get("steps") or model_cfg.get("steps", config["ai"].get("steps", 42))),
-        guidance_scale=float(payload.get("guidance_scale") or model_cfg.get("guidance_scale", config["ai"].get("guidance_scale", 8.0))),
+        steps=int(payload.get("steps") or model_cfg.get("steps", config["ai"].get("steps", 4))),
+        guidance_scale=float(payload.get("guidance_scale") or model_cfg.get("guidance_scale", config["ai"].get("guidance_scale", 1.0))),
         strength=float(model_cfg.get("strength", config["ai"].get("strength", 0.68))),
-        width=int(payload.get("width") or model_cfg.get("width", config["ai"].get("width", 1536))),
-        height=int(payload.get("height") or model_cfg.get("height", config["ai"].get("height", 1536))),
+        width=int(payload.get("width") or model_cfg.get("width", config["ai"].get("width", 1024))),
+        height=int(payload.get("height") or model_cfg.get("height", config["ai"].get("height", 1024))),
         canny_scale=float(model_cfg.get("canny_scale", 2.85)),
         depth_scale=float(model_cfg.get("depth_scale", 0.55)),
+        control_channels=list(model_cfg.get("control_channels", ["canny", "depth"])),
+        reference_channels=(
+            _parse_channels(payload.get("reference_channels"))
+            if "reference_channels" in payload
+            else list(model_cfg.get("reference_channels", []))
+        ),
         control_only=bool(model_cfg.get("control_only", True)),
         geometry_lock=bool(model_cfg.get("geometry_lock", True)),
     )
@@ -669,6 +869,8 @@ def _stage_ai_render(payload: dict[str, Any]) -> dict[str, Any]:
         mask_weight=float(score_cfg["mask_weight"]),
         prompt_weight=float(score_cfg["prompt_weight"]),
         copy_top_k=int(score_cfg["copy_top_k"]),
+        version=str(score_cfg.get("version", "legacy")),
+        structure_weights=dict(score_cfg.get("structure_v2", {})),
     )
     final_image = workdir / "final.png"
     shutil.copy2(_best_ranked_image(score_report), final_image)
@@ -825,11 +1027,195 @@ def _run_job(job_id: str, options: WorkflowOptions) -> None:
             )
 
 
+def _init_auto_stage_states() -> list[dict[str, Any]]:
+    return [_stage_state(stage_id) for stage_id in AUTO_STAGE_IDS]
+
+
+def _init_auto_scene_stage_states() -> list[dict[str, Any]]:
+    return [_stage_state(stage_id) for stage_id in AUTO_SCENE_STAGE_IDS]
+
+
+def _run_auto_job(job_id: str, options: AutoRunOptions) -> None:
+    try:
+        summary = run_auto_agent(options, progress=lambda stage, message, fraction: _append_log(job_id, stage, message, fraction))
+        artifacts = dict(summary.get("artifacts", {}))
+        artifacts.update({f"{key}_url": _file_url(value) for key, value in artifacts.items() if Path(str(value)).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".json"}})
+        final_status = "done" if summary.get("status") == "complete" else summary.get("status", "needs_review")
+        with JOBS_LOCK:
+            _mark_auto_stage_artifacts(JOBS[job_id], summary)
+            JOBS[job_id].update(
+                {
+                    "status": final_status,
+                    "progress": 1.0,
+                    "summary": summary,
+                    "artifacts": artifacts,
+                    "finished_at": time.time(),
+                }
+            )
+    except Exception as exc:
+        with JOBS_LOCK:
+            job = JOBS[job_id]
+            stages = _stage_map(job)
+            failed_stage = stages.get(job.get("stage"))
+            if failed_stage:
+                failed_stage["message"] = str(exc)
+                _finish_stage(failed_stage, "failed", _now())
+            JOBS[job_id].update(
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "finished_at": time.time(),
+                }
+            )
+
+
+def _run_auto_scene_job(job_id: str, options: AutoSceneOptions) -> None:
+    try:
+        summary = run_auto_scene(options, progress=lambda stage, message, fraction: _append_log(job_id, stage, message, fraction))
+        artifacts = dict(summary.get("artifacts", {}))
+        artifacts.update(
+            {
+                f"{key}_url": _file_url(value)
+                for key, value in artifacts.items()
+                if Path(str(value)).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".json", ".glb"}
+            }
+        )
+        final_status = "done" if summary.get("status") == "complete" else summary.get("status", "needs_review")
+        with JOBS_LOCK:
+            _mark_auto_scene_stage_artifacts(JOBS[job_id], summary)
+            JOBS[job_id].update(
+                {
+                    "status": final_status,
+                    "progress": 1.0,
+                    "summary": summary,
+                    "artifacts": artifacts,
+                    "finished_at": time.time(),
+                }
+            )
+    except Exception as exc:
+        with JOBS_LOCK:
+            job = JOBS[job_id]
+            stages = _stage_map(job)
+            failed_stage = stages.get(job.get("stage"))
+            if failed_stage:
+                failed_stage["message"] = str(exc)
+                _finish_stage(failed_stage, "failed", _now())
+            JOBS[job_id].update(
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "finished_at": time.time(),
+                }
+            )
+
+
+def _start_auto_job(payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = f"auto-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}"
+    workdir = OUTPUTS_ROOT / "auto" / run_id
+    options = AutoRunOptions(
+        request=payload.get("request") or payload.get("natural_language_request") or payload.get("prompt") or "clean product render",
+        output_dir=workdir,
+        config_path=ROOT / "configs/local.json",
+        source_mode=payload.get("source_mode") or "auto",
+        model_path=Path(payload["model_path"]) if payload.get("model_path") else None,
+        reference_image=Path(payload["reference_image"]) if payload.get("reference_image") else None,
+        output_views=int(payload.get("output_views") or payload.get("views") or 3),
+        quality_mode=payload.get("quality_mode") or payload.get("quality") or "balanced",
+        geometry_mode=payload.get("geometry_mode") or payload.get("geometry") or "strict",
+        style_preset=payload.get("style_preset") or payload.get("style") or "product",
+        backend_model_key=payload.get("backend_model_key") or payload.get("model_key"),
+        backend=payload.get("backend"),
+        num_candidates_per_view=int(payload.get("num_candidates_per_view") or payload.get("candidates") or 3),
+        max_retries=int(payload.get("max_retries") or 2),
+        seed=int(payload.get("seed") or 20260610),
+        dry_run=bool(payload.get("dry_run") or payload.get("backend") == "mock"),
+        use_llm=not bool(payload.get("no_llm")),
+    )
+    with JOBS_LOCK:
+        JOBS[run_id] = {
+            "id": run_id,
+            "task_id": run_id,
+            "status": "running",
+            "stage": "queued",
+            "progress": 0.0,
+            "workdir": str(workdir),
+            "logs": [],
+            "stages": _init_auto_stage_states(),
+            "created_at": time.time(),
+            "mode": "auto_agent",
+        }
+    thread = threading.Thread(target=_run_auto_job, args=(run_id, options), daemon=True)
+    thread.start()
+    snapshot = _job_snapshot(run_id)
+    return {
+        "task_id": run_id,
+        "status": snapshot.get("status", "running"),
+        "stage": snapshot.get("stage", "queued"),
+        "artifacts": snapshot.get("artifacts", {}),
+        "job": snapshot,
+    }
+
+
+def _start_auto_scene_job(payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = f"scene-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}"
+    workdir = OUTPUTS_ROOT / "auto_scene" / run_id
+    options = AutoSceneOptions(
+        request=payload.get("request") or payload.get("natural_language_request") or payload.get("prompt") or "modular product scene",
+        output_dir=workdir,
+        config_path=ROOT / "configs/local.json",
+        output_views=int(payload.get("output_views") or payload.get("views") or 3),
+        quality_mode=payload.get("quality_mode") or payload.get("quality") or "balanced",
+        geometry_mode=payload.get("geometry_mode") or payload.get("geometry") or "strict",
+        style_preset=payload.get("style_preset") or payload.get("style") or "exhibition",
+        backend_model_key=payload.get("backend_model_key") or payload.get("model_key"),
+        backend=payload.get("backend"),
+        num_candidates_per_view=int(payload.get("num_candidates_per_view") or payload.get("candidates") or 3),
+        max_retries=int(payload.get("max_retries") or 2),
+        seed=int(payload.get("seed") or 20260610),
+        allow_procedural_fallback=bool(payload.get("allow_procedural_fallback", True)),
+        require_concept_confirmation=bool(payload.get("require_concept_confirmation", False)),
+        dry_run=bool(payload.get("dry_run") or payload.get("backend") == "mock"),
+        use_llm=not bool(payload.get("no_llm")),
+        render_backend=payload.get("render_backend") or "auto",
+        hero_model_path=Path(payload["hero_model_path"]) if payload.get("hero_model_path") else None,
+    )
+    with JOBS_LOCK:
+        JOBS[run_id] = {
+            "id": run_id,
+            "task_id": run_id,
+            "status": "running",
+            "stage": "queued",
+            "progress": 0.0,
+            "workdir": str(workdir),
+            "logs": [],
+            "stages": _init_auto_scene_stage_states(),
+            "created_at": time.time(),
+            "mode": "auto_scene",
+        }
+    thread = threading.Thread(target=_run_auto_scene_job, args=(run_id, options), daemon=True)
+    thread.start()
+    snapshot = _job_snapshot(run_id)
+    return {
+        "task_id": run_id,
+        "status": snapshot.get("status", "running"),
+        "stage": snapshot.get("stage", "queued"),
+        "artifacts": snapshot.get("artifacts", {}),
+        "job": snapshot,
+    }
+
+
 def _start_job(payload: dict[str, Any]) -> dict[str, Any]:
     run_id = f"run-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}"
     workdir = OUTPUTS_ROOT / "web-runs" / run_id
+    config = load_config(ROOT / "configs/local.json")
     agent_render = bool(payload.get("agent_render", False))
-    model_key = payload.get("model_key") or ("hidream_o1_image_full" if agent_render else "sdxl_controlnet_geometry")
+    model_key = payload.get("model_key") or (
+        config.get("agent", {}).get("default_model_key")
+        if agent_render
+        else config.get("ai", {}).get("default_model_key")
+    ) or "flux2_klein_4b"
     options = WorkflowOptions(
         prompt=payload.get("prompt") or "faceted black obsidian sci fi artifact, cyan magenta studio lighting",
         workdir=workdir,
@@ -839,12 +1225,12 @@ def _start_job(payload: dict[str, Any]) -> dict[str, Any]:
         views=int(payload.get("views") or 1),
         render_resolution=int(payload.get("render_resolution") or 1536),
         render_samples=int(payload.get("render_samples") or 64),
-        ai_width=int(payload.get("ai_width") or 1536),
-        ai_height=int(payload.get("ai_height") or 1536),
+        ai_width=int(payload.get("ai_width") or config.get("models", {}).get(model_key, {}).get("width", 1024)),
+        ai_height=int(payload.get("ai_height") or config.get("models", {}).get(model_key, {}).get("height", 1024)),
         candidates=int(payload.get("candidates") or 1),
         seed=int(payload.get("seed") or 20260610),
-        steps=int(payload.get("steps") or 42),
-        guidance_scale=float(payload.get("guidance_scale") or 8.0),
+        steps=int(payload.get("steps") or config.get("models", {}).get(model_key, {}).get("steps", 4)),
+        guidance_scale=float(payload.get("guidance_scale") or config.get("models", {}).get(model_key, {}).get("guidance_scale", 1.0)),
         canny_scale=float(payload.get("canny_scale") or 2.85),
         depth_scale=float(payload.get("depth_scale") or 0.55),
         geometry_lock=bool(payload.get("geometry_lock", True)),
@@ -852,7 +1238,7 @@ def _start_job(payload: dict[str, Any]) -> dict[str, Any]:
         model_key=model_key,
         agent_render=agent_render,
         agent_max_generations=int(payload.get("agent_max_generations") or 10),
-        agent_target_view=payload.get("agent_target_view") or "view_05",
+        agent_target_view=payload.get("agent_target_view") or config.get("agent", {}).get("target_view", "view_locked"),
         agent_expand_views=bool(payload.get("agent_expand_views", True)),
     )
     with JOBS_LOCK:
@@ -914,6 +1300,8 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/config":
                 config = load_config(ROOT / "configs/local.json")
+                default_model_key = config.get("ai", {}).get("default_model_key", "flux2_klein_4b")
+                default_model = config["models"].get(default_model_key, config["models"]["flux2_klein_4b"])
                 _json_response(
                     self,
                     {
@@ -922,23 +1310,23 @@ class AppHandler(BaseHTTPRequestHandler):
                         "model_status": _model_status(config),
                         "defaults": {
                             "prompt": "same exact 3d model silhouette, faceted black obsidian bird mask, long central beak preserved, large hollow open side slots preserved, side handles preserved, angular top facets preserved, dark reflective ceramic glass, subtle cyan magenta glowing seams, studio render",
-                            "negative_prompt": config["models"]["sdxl_controlnet_geometry"].get("negative_prompt", ""),
+                            "negative_prompt": default_model.get("negative_prompt", ""),
                             "render_resolution": config["render"]["resolution"],
-                            "ai_width": config["models"]["sdxl_controlnet_geometry"].get("width", 1536),
-                            "ai_height": config["models"]["sdxl_controlnet_geometry"].get("height", 1536),
-                            "steps": config["models"]["sdxl_controlnet_geometry"].get("steps", 42),
-                            "canny_scale": config["models"]["sdxl_controlnet_geometry"].get("canny_scale", 2.85),
-                            "depth_scale": config["models"]["sdxl_controlnet_geometry"].get("depth_scale", 0.55),
+                            "ai_width": default_model.get("width", 1024),
+                            "ai_height": default_model.get("height", 1024),
+                            "steps": default_model.get("steps", 4),
+                            "canny_scale": default_model.get("canny_scale", 0.0),
+                            "depth_scale": default_model.get("depth_scale", 0.0),
                             "agent_render": config.get("agent", {}).get("enabled", True),
                             "agent_max_generations": config.get("web", {}).get(
                                 "agent_max_generations", config.get("agent", {}).get("max_generations", 10)
                             ),
-                            "agent_target_view": config.get("agent", {}).get("target_view", "view_05"),
+                            "agent_target_view": config.get("agent", {}).get("target_view", "view_locked"),
                             "shape_quality": config["models"]["hunyuan3d_2_1_shape"].get("default_profile", "stable"),
                             "shape_profiles": config["models"]["hunyuan3d_2_1_shape"].get("profiles", {}),
-                            "ai_steps": config.get("web", {}).get("ai_steps", config["models"]["hidream_o1_image_full"].get("steps", 50)),
+                            "ai_steps": config.get("web", {}).get("ai_steps", default_model.get("steps", 42)),
                             "ai_resolution": config.get("web", {}).get(
-                                "ai_resolution", config["models"]["hidream_o1_image_full"].get("width", 2048)
+                                "ai_resolution", default_model.get("width", 1536)
                             ),
                         },
                         "latest": _latest_artifacts(),
@@ -949,6 +1337,28 @@ class AppHandler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     jobs = sorted((dict(job) for job in JOBS.values()), key=lambda item: item.get("created_at", 0), reverse=True)
                 _json_response(self, {"jobs": jobs})
+                return
+            if path == "/api/auto-agent/status":
+                params = parse_qs(parsed.query)
+                config = load_config(ROOT / "configs/local.json")
+                check_hf_mirror = params.get("check_hf_mirror", ["0"])[0].lower() in {"1", "true", "yes"}
+                _json_response(self, qwen_runtime_status(config, check_hf_mirror=check_hf_mirror))
+                return
+            if path.startswith("/api/auto-run/"):
+                job_id = path.rsplit("/", 1)[-1]
+                job = _job_snapshot(job_id)
+                if not job:
+                    _json_response(self, {"error": "job not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                _json_response(self, job)
+                return
+            if path.startswith("/api/auto-scene/"):
+                job_id = path.rsplit("/", 1)[-1]
+                job = _job_snapshot(job_id)
+                if not job:
+                    _json_response(self, {"error": "job not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                _json_response(self, job)
                 return
             if path.startswith("/api/jobs/"):
                 job_id = path.rsplit("/", 1)[-1]
@@ -988,6 +1398,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload = _read_json(self)
                 _json_response(self, _start_job(payload), HTTPStatus.ACCEPTED)
                 return
+            if path == "/api/auto-run":
+                payload = _read_json(self)
+                _json_response(self, _start_auto_job(payload), HTTPStatus.ACCEPTED)
+                return
+            if path == "/api/auto-scene":
+                payload = _read_json(self)
+                _json_response(self, _start_auto_scene_job(payload), HTTPStatus.ACCEPTED)
+                return
             if path == "/api/stage/3d":
                 payload = _read_json(self)
                 _json_response(self, _stage_generate_3d(payload))
@@ -1001,23 +1419,16 @@ class AppHandler(BaseHTTPRequestHandler):
                 _json_response(self, _stage_ai_render(payload))
                 return
             if path == "/api/upload":
-                ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
-                if ctype != "multipart/form-data":
-                    _json_response(self, {"error": "multipart/form-data required"}, HTTPStatus.BAD_REQUEST)
-                    return
-                pdict["boundary"] = bytes(pdict["boundary"], "utf-8")
-                pdict["CONTENT-LENGTH"] = int(self.headers.get("Content-Length", "0"))
-                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"}, keep_blank_values=True)
-                item = form["file"] if "file" in form else None
-                if item is None or not getattr(item, "filename", ""):
+                upload = _read_multipart_upload(self)
+                if upload is None:
                     _json_response(self, {"error": "file field is required"}, HTTPStatus.BAD_REQUEST)
                     return
+                filename, data = upload
                 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-                safe_name = Path(item.filename).name.replace(" ", "_")
+                safe_name = Path(filename).name.replace(" ", "_")
                 target = UPLOAD_ROOT / f"{time.strftime('%Y%m%d-%H%M%S')}_{safe_name}"
                 with target.open("wb") as fh:
-                    shutil_data = item.file.read()
-                    fh.write(shutil_data)
+                    fh.write(data)
                 _json_response(self, {"path": str(target), "url": _file_url(target)})
                 return
             _json_response(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)

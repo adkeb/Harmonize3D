@@ -38,8 +38,9 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 
 source .venv/bin/activate
+PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python3}"
 
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import os
 for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
     if os.environ.get(key):
@@ -47,6 +48,11 @@ for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy
 print("HF_ENDPOINT=", os.environ.get("HF_ENDPOINT"))
 print("NO_PROXY=", os.environ.get("NO_PROXY"))
 PY
+
+echo "Direct endpoint preflight (no proxy): $HF_ENDPOINT"
+curl -I --noproxy '*' --connect-timeout 10 "$HF_ENDPOINT" | sed -n '1,12p'
+echo "Direct model API preflight (no proxy): $MODEL_ID"
+curl -I --noproxy '*' --connect-timeout 10 "$HF_ENDPOINT/api/models/$MODEL_ID" | sed -n '1,12p'
 
 if [[ -x tools/hfd.sh ]]; then
   tools/hfd.sh "$MODEL_ID" \

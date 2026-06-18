@@ -27,12 +27,13 @@
     "output_dir": "/root/sakura/work/Harmonize3D/outputs/generated_models"
   },
   "ai": {
-    "default_backend": "sdxl-controlnet-geometry",
+    "default_backend": "flux2-klein",
+    "default_model_key": "flux2_klein_4b",
     "device": "cuda:0",
-    "dtype": "float16",
+    "dtype": "bfloat16",
     "candidates_per_view": 1,
-    "steps": 42,
-    "guidance_scale": 8.0,
+    "steps": 12,
+    "guidance_scale": 1.0,
     "strength": 0.68,
     "seed": 20260610,
     "width": 1536,
@@ -40,8 +41,22 @@
   },
   "web": {
     "agent_max_generations": 10,
-    "ai_steps": 12,
+    "ai_steps": 16,
     "ai_resolution": 1024
+  },
+  "reference_generation": {
+    "default_model_key": "flux2_klein_4b",
+    "provider": "external_imagegen",
+    "dashscope_model": "wan2.6-t2i",
+    "dashscope_image_edit_model": "wan2.6-image",
+    "concept_size": "1472*1104",
+    "module_reference_size": "1280*1280",
+    "width": 1280,
+    "height": 1280,
+    "concurrent_workers": 2,
+    "dashscope_retries": 4,
+    "dashscope_retry_delay_seconds": 8,
+    "max_review_attempts": 3
   },
   "models": {
     "hunyuan3d_2_1_shape": {
@@ -50,29 +65,36 @@
       "model_path": "/root/sakura/work/Harmonize3D/models/Hunyuan3D-2.1",
       "script": "/root/sakura/work/Harmonize3D/scripts/run_hunyuan_shape_white.py",
       "enabled": true,
-      "default_profile": "balanced",
-      "steps": 12,
+      "default_profile": "high",
+      "auto_scene_profile": "high",
+      "steps": 50,
       "guidance_scale": 5.0,
-      "octree_resolution": 256,
-      "num_chunks": 8000,
+      "octree_resolution": 512,
+      "num_chunks": 24000,
       "profiles": {
         "stable": {
-          "steps": 5,
-          "guidance_scale": 5.0,
-          "octree_resolution": 256,
-          "num_chunks": 8000
-        },
-        "balanced": {
-          "steps": 12,
-          "guidance_scale": 5.0,
-          "octree_resolution": 256,
-          "num_chunks": 8000
-        },
-        "high": {
-          "steps": 20,
+          "steps": 32,
           "guidance_scale": 5.0,
           "octree_resolution": 384,
-          "num_chunks": 12000
+          "num_chunks": 16000
+        },
+        "balanced": {
+          "steps": 44,
+          "guidance_scale": 5.0,
+          "octree_resolution": 512,
+          "num_chunks": 24000
+        },
+        "high": {
+          "steps": 56,
+          "guidance_scale": 5.0,
+          "octree_resolution": 512,
+          "num_chunks": 32000
+        },
+        "ultra": {
+          "steps": 72,
+          "guidance_scale": 5.0,
+          "octree_resolution": 768,
+          "num_chunks": 40000
         }
       },
       "license_note": "Tencent Hunyuan3D 2.1 shape model. Use local mirrored weights for offline runs."
@@ -83,25 +105,167 @@
       "canny_controlnet": "/root/sakura/work/Harmonize3D/models/controlnet-canny-sdxl-1.0",
       "depth_controlnet": "/root/sakura/work/Harmonize3D/models/controlnet-depth-sdxl-1.0",
       "variant": "fp16",
-      "enabled": true,
+      "enabled": false,
       "width": 1536,
       "height": 1536,
       "steps": 42,
       "guidance_scale": 8.0,
       "strength": 0.68,
       "canny_scale": 2.85,
-      "depth_scale": 0.55,
+      "depth_scale": 0.25,
+      "control_channels": [
+        "canny"
+      ],
       "control_only": true,
       "geometry_lock": true,
       "negative_prompt": "white clay, pale plastic, filled side slots, missing open holes, changed silhouette, extra horns, missing long beak, missing side handles, human face, eyes, text, logo, deformed geometry, smooth simplified helmet",
       "license_note": "Local SDXL Base plus Canny/Depth ControlNet, used for geometry-constrained image rendering."
+    },
+    "flux2_klein_4b": {
+      "backend": "flux2-klein",
+      "model_id": "black-forest-labs/FLUX.2-klein-4B",
+      "local_path": "/root/sakura/work/Harmonize3D/models/FLUX.2-klein-4B",
+      "enabled": true,
+      "width": 1024,
+      "height": 1024,
+      "steps": 12,
+      "guidance_scale": 1.0,
+      "dtype": "bfloat16",
+      "reference_channels": [
+        "rgb",
+        "edge",
+        "depth",
+        "normal",
+        "mask",
+        "skeleton"
+      ],
+      "geometry_lock": false,
+      "max_sequence_length": 512,
+      "enable_model_cpu_offload": true,
+      "license_note": "FLUX.2 [klein] 4B, Apache-2.0, used as the default lightweight multi-reference image renderer."
+    },
+    "zimage_turbo_staged_control": {
+      "backend": "zimage-staged-control",
+      "model_id": "Tongyi-MAI/Z-Image-Turbo",
+      "local_path": "/root/sakura/work/Harmonize3D/models/Z-Image-Turbo",
+      "controlnet_model_id": "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1",
+      "controlnet_file": "/root/sakura/work/Harmonize3D/models/Z-Image-Turbo-Fun-Controlnet-Union-2.1-lite-2602-8steps.safetensors",
+      "controlnet_config": "/root/sakura/work/Harmonize3D/models/Z-Image-ControlNet-config-lite",
+      "i2l_model_id": "DiffSynth-Studio/Z-Image-i2L",
+      "i2l_model": "/root/sakura/work/Harmonize3D/models/Z-Image-i2L/model.safetensors",
+      "enabled": false,
+      "width": 768,
+      "height": 768,
+      "steps": 8,
+      "guidance_scale": 1.0,
+      "dtype": "bfloat16",
+      "structure_channels": [
+        "depth",
+        "gray",
+        "canny"
+      ],
+      "structure_schedule": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          0.35,
+          0.85
+        ],
+        [
+          0.7,
+          0.35
+        ],
+        [
+          1.0,
+          0.2
+        ]
+      ],
+      "appearance_schedule": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.35,
+          0.15
+        ],
+        [
+          0.7,
+          0.55
+        ],
+        [
+          1.0,
+          0.7
+        ]
+      ],
+      "license_note": "Experimental Z-Image staged ControlNet plus image-to-LoRA route. Disabled until local weights are downloaded and generation tests pass."
+    },
+    "zimage_lite_staged_control": {
+      "backend": "zimage-staged-control",
+      "model_id": "Tongyi-MAI/Z-Image",
+      "local_path": "/root/sakura/work/Harmonize3D/models/Z-Image",
+      "controlnet_model_id": "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+      "controlnet_file": "/root/sakura/work/Harmonize3D/models/Z-Image-Fun-Controlnet-Union-2.1/Z-Image-Fun-Controlnet-Union-2.1-lite.safetensors",
+      "controlnet_config": "/root/sakura/work/Harmonize3D/models/Z-Image-ControlNet-config-lite",
+      "i2l_model_id": "DiffSynth-Studio/Z-Image-i2L",
+      "i2l_model": "/root/sakura/work/Harmonize3D/models/Z-Image-i2L/model.safetensors",
+      "enabled": false,
+      "width": 768,
+      "height": 768,
+      "steps": 24,
+      "guidance_scale": 1.0,
+      "dtype": "bfloat16",
+      "structure_channels": [
+        "depth",
+        "gray",
+        "canny"
+      ],
+      "structure_schedule": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          0.35,
+          0.85
+        ],
+        [
+          0.7,
+          0.35
+        ],
+        [
+          1.0,
+          0.2
+        ]
+      ],
+      "appearance_schedule": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.35,
+          0.15
+        ],
+        [
+          0.7,
+          0.55
+        ],
+        [
+          1.0,
+          0.7
+        ]
+      ],
+      "license_note": "Experimental lighter Z-Image staged ControlNet route using the non-turbo base and official lite ControlNet. Disabled until local base weights are downloaded and generation tests pass."
     },
     "hidream_o1_image_full": {
       "backend": "hidream-o1-image",
       "repo_root": "/root/sakura/work/Harmonize3D/tools/HiDream-O1-Image",
       "local_path": "/root/sakura/work/Harmonize3D/models/HiDream-O1-Image",
       "model_type": "full",
-      "enabled": true,
+      "enabled": false,
       "width": 2048,
       "height": 2048,
       "steps": 50,
@@ -126,8 +290,20 @@
       "model_id": "stabilityai/sdxl-turbo",
       "local_path": "/root/sakura/work/Harmonize3D/models/sdxl-turbo",
       "variant": "fp16",
-      "enabled": true,
+      "enabled": false,
       "license_note": "Local FP16 SDXL Turbo image-to-image renderer; check current Stability AI license terms for production use."
+    },
+    "sdxl_turbo_reference": {
+      "backend": "diffusers-txt2img",
+      "model_id": "stabilityai/sdxl-turbo",
+      "local_path": "/root/sakura/work/Harmonize3D/models/sdxl-turbo",
+      "variant": "fp16",
+      "enabled": false,
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "guidance_scale": 0.0,
+      "license_note": "Local SDXL Turbo text-to-image reference generator for Hunyuan3D prompt-to-3D input."
     },
     "flux_schnell": {
       "backend": "diffusers-flux",
@@ -152,23 +328,80 @@
     }
   },
   "score": {
+    "version": "structure_v2",
     "edge_weight": 0.55,
     "mask_weight": 0.25,
     "prompt_weight": 0.2,
-    "copy_top_k": 1
+    "copy_top_k": 1,
+    "structure_v2": {
+      "silhouette_weight": 0.3,
+      "edge_chamfer_weight": 0.25,
+      "added_part_weight": 0.2,
+      "roughness_weight": 0.15,
+      "background_weight": 0.1
+    }
+  },
+  "agent_llm": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.7-plus",
+    "hf_model_id": "",
+    "hf_endpoint": "",
+    "local_model_dir": "",
+    "container_model_dir": "",
+    "service_script": "",
+    "timeout_seconds": 90,
+    "temperature": 0.2,
+    "max_tokens": 1600,
+    "api_key": "",
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "no_proxy": false,
+    "use_tool_schema": true,
+    "fallback_to_rules": true
+  },
+  "auto_agent": {
+    "default_source_mode": "procedural",
+    "text_to_3d_fallback": "procedural",
+    "model_backend": "sample",
+    "default_model_key": "flux2_klein_4b",
+    "default_output_views": 3,
+    "quality_presets": {
+      "fast": {
+        "render_resolution": 768,
+        "ai_resolution": 768,
+        "render_samples": 32
+      },
+      "balanced": {
+        "render_resolution": 1024,
+        "ai_resolution": 1024,
+        "render_samples": 64
+      },
+      "high": {
+        "render_resolution": 1536,
+        "ai_resolution": 1536,
+        "render_samples": 96
+      }
+    }
   },
   "agent": {
     "enabled": true,
+    "default_model_key": "flux2_klein_4b",
     "max_generations": 10,
-    "target_view": "view_05",
+    "target_view": "view_locked",
     "expand_view_ids": [
-      "view_01",
-      "view_05",
-      "view_06"
+      "view_locked",
+      "view_left_30",
+      "view_right_30"
     ],
+    "candidates_per_view": 3,
     "default_reference_channels": [
       "rgb",
-      "edge"
+      "edge",
+      "depth",
+      "normal",
+      "mask",
+      "skeleton"
     ],
     "experimental_reference_channels": [],
     "roughness_weight": 0.25,

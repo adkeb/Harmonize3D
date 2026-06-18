@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .manifest import read_manifest, write_manifest
+from .scoring_v2 import score_structure_v2
 
 
 def _load_gray(path: str | Path, size: tuple[int, int] | None = None) -> np.ndarray:
@@ -68,6 +69,8 @@ def score_candidates(
     mask_weight: float = 0.25,
     prompt_weight: float = 0.2,
     copy_top_k: int = 1,
+    version: str = "legacy",
+    structure_weights: dict[str, float] | None = None,
 ) -> Path:
     render_manifest = read_manifest(render_manifest_path)
     ai_manifest = read_manifest(ai_manifest_path)
@@ -84,24 +87,33 @@ def score_candidates(
         candidate_path = Path(candidate["file"])
         with Image.open(candidate_path) as candidate_image:
             size = candidate_image.size
-        source_edge = _edge_map(view["files"]["edge"], size=size)
-        candidate_edge = _edge_map(candidate_path, size=size)
-        source_mask = _binary_mask(view["files"]["mask"], size=size)
-        candidate_mask = _foreground_mask_from_image(candidate_path, size=size)
-        edge_score = _f1(source_edge, candidate_edge)
-        mask_score = _mask_iou(source_mask, candidate_mask)
-        prompt_score = 0.5
-        total = edge_weight * edge_score + mask_weight * mask_score + prompt_weight * prompt_score
-        if math.isnan(total):
-            total = 0.0
-        row = {
-            **candidate,
-            "scores": {
+        if version == "structure_v2":
+            scores = score_structure_v2(
+                candidate_path=candidate_path,
+                source_files=view["files"],
+                weights=structure_weights,
+            )
+            total = float(scores["total"])
+        else:
+            source_edge = _edge_map(view["files"]["edge"], size=size)
+            candidate_edge = _edge_map(candidate_path, size=size)
+            source_mask = _binary_mask(view["files"]["mask"], size=size)
+            candidate_mask = _foreground_mask_from_image(candidate_path, size=size)
+            edge_score = _f1(source_edge, candidate_edge)
+            mask_score = _mask_iou(source_mask, candidate_mask)
+            prompt_score = 0.5
+            total = edge_weight * edge_score + mask_weight * mask_score + prompt_weight * prompt_score
+            if math.isnan(total):
+                total = 0.0
+            scores = {
                 "edge_f1": round(edge_score, 6),
                 "mask_iou": round(mask_score, 6),
                 "prompt_proxy": round(prompt_score, 6),
                 "total": round(total, 6),
-            },
+            }
+        row = {
+            **candidate,
+            "scores": scores,
         }
         rows.append(row)
 
@@ -114,10 +126,12 @@ def score_candidates(
 
     report = {
         "type": "score_report",
+        "score_version": version,
         "weights": {
             "edge_weight": edge_weight,
             "mask_weight": mask_weight,
             "prompt_weight": prompt_weight,
+            "structure_v2": structure_weights or {},
         },
         "count": len(rows),
         "ranked": rows,

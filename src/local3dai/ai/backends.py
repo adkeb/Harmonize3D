@@ -7,11 +7,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
-from local3dai.ai.geometry import geometry_lock_render, make_canny_control
+from local3dai.ai.geometry import (
+    geometry_lock_render,
+    make_canny_control,
+    mesh_adaptive_lock_render,
+    mesh_detail_lock_render,
+    mesh_position_lock_render,
+    mesh_quality_lock_render,
+)
 from local3dai.manifest import read_manifest, write_manifest
+
+_FLUX2_PIPELINE_CACHE: dict[tuple[str, str, str, bool], Any] = {}
 
 
 def _open_rgb(path: str | Path) -> Image.Image:
@@ -332,6 +342,80 @@ class DiffusersImageBackend:
         return write_manifest(output / "manifest.json", result)
 
 
+class DiffusersTextToImageBackend:
+    name = "diffusers-txt2img"
+
+    def generate_reference(
+        self,
+        output: str | Path,
+        *,
+        prompt: str,
+        seed: int,
+        model_ref: str,
+        negative_prompt: str = "",
+        device: str = "cuda:0",
+        dtype: str = "float16",
+        variant: str | None = "fp16",
+        steps: int = 4,
+        guidance_scale: float = 0.0,
+        width: int = 1024,
+        height: int = 1024,
+        **_: Any,
+    ) -> Path:
+        try:
+            import torch
+            from diffusers import AutoPipelineForText2Image
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("Diffusers text-to-image reference generation requires torch and diffusers.") from exc
+
+        torch_dtype = {
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+            "float32": torch.float32,
+        }.get(dtype.lower(), torch.float16)
+        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
+        if variant:
+            load_kwargs["variant"] = variant
+        pipe = AutoPipelineForText2Image.from_pretrained(model_ref, **load_kwargs)
+        pipe.to(device)
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing()
+        generator = torch.Generator(device=device.split(":")[0]).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt or None,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            width=width,
+            height=height,
+            generator=generator,
+        ).images[0]
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        return output_path
+
+    def generate(self, *_: Any, **__: Any) -> Path:
+        raise RuntimeError("diffusers-txt2img is only used for prompt reference generation.")
+
+
+def resolve_sdxl_control_channels(
+    model_config: dict[str, Any] | None = None,
+    control_channels: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    cfg = model_config or {}
+    channels = list(control_channels or cfg.get("control_channels") or ["canny", "depth"])
+    channels = [str(channel).strip().lower() for channel in channels if str(channel).strip()]
+    if not channels:
+        raise RuntimeError("SDXL ControlNet backend needs at least one control channel.")
+    unsupported = sorted(set(channels) - {"canny", "depth"})
+    if unsupported:
+        raise RuntimeError(f"Unsupported SDXL control channels: {unsupported}")
+    return channels
+
+
 class SDXLControlNetGeometryBackend:
     name = "sdxl-controlnet-geometry"
 
@@ -360,6 +444,7 @@ class SDXLControlNetGeometryBackend:
         canny_low: int = 80,
         canny_high: int = 180,
         geometry_lock: bool = True,
+        control_channels: list[str] | tuple[str, ...] | None = None,
         **_: Any,
     ) -> Path:
         try:
@@ -379,13 +464,15 @@ class SDXLControlNetGeometryBackend:
         base_model = model_ref or cfg.get("base_model") or cfg.get("local_path") or cfg.get("model_id")
         canny_controlnet = cfg.get("canny_controlnet", "")
         depth_controlnet = cfg.get("depth_controlnet", "")
+        channels = resolve_sdxl_control_channels(cfg, control_channels)
         if not base_model:
             raise RuntimeError("SDXL ControlNet backend needs a base model path or model_ref.")
-        for label, value in {
-            "base_model": base_model,
-            "canny_controlnet": canny_controlnet,
-            "depth_controlnet": depth_controlnet,
-        }.items():
+        required_paths: dict[str, str] = {"base_model": str(base_model)}
+        if "canny" in channels:
+            required_paths["canny_controlnet"] = str(canny_controlnet)
+        if "depth" in channels:
+            required_paths["depth_controlnet"] = str(depth_controlnet)
+        for label, value in required_paths.items():
             if not value:
                 raise RuntimeError(f"SDXL ControlNet backend is missing {label} in model config.")
             if Path(value).is_absolute() and not Path(value).exists():
@@ -406,23 +493,23 @@ class SDXLControlNetGeometryBackend:
             "float32": torch.float32,
         }.get(dtype.lower(), torch.float16)
 
+        controlnet_paths = {
+            "canny": str(canny_controlnet),
+            "depth": str(depth_controlnet),
+        }
         controlnets = [
             ControlNetModel.from_pretrained(
-                str(canny_controlnet),
+                controlnet_paths[channel],
                 torch_dtype=torch_dtype,
                 variant=variant,
                 use_safetensors=True,
-            ),
-            ControlNetModel.from_pretrained(
-                str(depth_controlnet),
-                torch_dtype=torch_dtype,
-                variant=variant,
-                use_safetensors=True,
-            ),
+            )
+            for channel in channels
         ]
+        controlnet_arg: Any = controlnets if len(controlnets) > 1 else controlnets[0]
         pipe = Pipeline.from_pretrained(
             str(base_model),
-            controlnet=controlnets,
+            controlnet=controlnet_arg,
             torch_dtype=torch_dtype,
             variant=variant,
             use_safetensors=True,
@@ -492,6 +579,7 @@ class SDXLControlNetGeometryBackend:
             "base_model": str(base_model),
             "canny_controlnet": str(canny_controlnet),
             "depth_controlnet": str(depth_controlnet),
+            "control_channels": channels,
             "variant": variant or "",
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -510,22 +598,39 @@ class SDXLControlNetGeometryBackend:
         for view in manifest.get("views", []):
             files = view.get("files", {})
             init_image = _open_rgb(files["rgb"]).resize(size, Image.Resampling.LANCZOS)
-            depth_image = _open_rgb(files["depth"]).resize(size, Image.Resampling.LANCZOS)
-            canny_image = make_canny_control(init_image, low=canny_low, high=canny_high)
-            canny_path = controls_dir / f"{view['view_id']}_canny.png"
-            depth_path = controls_dir / f"{view['view_id']}_depth.png"
-            canny_image.save(canny_path)
-            depth_image.save(depth_path)
+            control_images: dict[str, Image.Image] = {}
+            control_paths: dict[str, Path] = {}
+            if "canny" in channels:
+                canny_image = make_canny_control(init_image, low=canny_low, high=canny_high)
+                canny_path = controls_dir / f"{view['view_id']}_canny.png"
+                canny_image.save(canny_path)
+                control_images["canny"] = canny_image
+                control_paths["canny"] = canny_path
+            if "depth" in channels:
+                depth_image = _open_rgb(files["depth"]).resize(size, Image.Resampling.LANCZOS)
+                depth_path = controls_dir / f"{view['view_id']}_depth.png"
+                depth_image.save(depth_path)
+                control_images["depth"] = depth_image
+                control_paths["depth"] = depth_path
 
             for candidate_index in range(candidates_per_view):
                 candidate_seed = seed + candidate_index + len(result["candidates"]) * 997
                 generator = torch.Generator(device=device.split(":")[0]).manual_seed(candidate_seed)
+                scales = {"canny": canny_scale, "depth": depth_scale}
+                guidance_end = {"canny": 0.95, "depth": 0.9}
+                control_input = [control_images[channel] for channel in channels]
+                control_scale = [float(scales[channel]) for channel in channels]
+                control_end = [float(guidance_end[channel]) for channel in channels]
+                if len(channels) == 1:
+                    control_input = control_input[0]
+                    control_scale = control_scale[0]
+                    control_end = control_end[0]
                 call_kwargs: dict[str, Any] = {
                     "num_inference_steps": steps,
                     "guidance_scale": guidance_scale,
-                    "controlnet_conditioning_scale": [canny_scale, depth_scale],
-                    "control_guidance_start": [0.0, 0.0],
-                    "control_guidance_end": [0.95, 0.9],
+                    "controlnet_conditioning_scale": control_scale,
+                    "control_guidance_start": [0.0 for _ in channels] if len(channels) > 1 else 0.0,
+                    "control_guidance_end": control_end,
                     "generator": generator,
                     "width": width,
                     "height": height,
@@ -536,10 +641,10 @@ class SDXLControlNetGeometryBackend:
                     call_kwargs["prompt"] = prompt
                     call_kwargs["negative_prompt"] = negative_prompt
                 if control_only:
-                    call_kwargs["image"] = [canny_image, depth_image]
+                    call_kwargs["image"] = control_input
                 else:
                     call_kwargs["image"] = init_image
-                    call_kwargs["control_image"] = [canny_image, depth_image]
+                    call_kwargs["control_image"] = control_input
                     call_kwargs["strength"] = strength
                 image = pipe(**call_kwargs).images[0]
                 view_dir = output / view["view_id"]
@@ -564,9 +669,446 @@ class SDXLControlNetGeometryBackend:
                         "seed": candidate_seed,
                         "file": str(image_path),
                         "direct_file": str(direct_path),
-                        "control_canny": str(canny_path),
-                        "control_depth": str(depth_path),
+                        **{f"control_{channel}": str(path) for channel, path in control_paths.items()},
                         "source_files": files,
+                    }
+                )
+        return write_manifest(output / "manifest.json", result)
+
+
+def resolve_flux_reference_channels(
+    model_config: dict[str, Any] | None = None,
+    reference_channels: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    cfg = model_config or {}
+    channels = list(reference_channels if reference_channels is not None else cfg.get("reference_channels", []))
+    normalized: list[str] = []
+    aliases = {
+        "white": "rgb",
+        "white_model": "rgb",
+        "canny": "edge",
+        "silhouette": "mask",
+        "bone": "skeleton",
+    }
+    for channel in channels:
+        value = aliases.get(str(channel).strip().lower(), str(channel).strip().lower())
+        if value and value not in normalized:
+            normalized.append(value)
+    unsupported = sorted(set(normalized) - {"rgb", "edge", "depth", "normal", "mask", "skeleton"})
+    if unsupported:
+        raise RuntimeError(f"Unsupported Flux2 Klein reference channels: {unsupported}")
+    return normalized
+
+
+def _torch_dtype(dtype: str, torch: Any, default: Any) -> Any:
+    return {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }.get(str(dtype).lower(), default)
+
+
+def _skeleton_from_mask(mask: Image.Image) -> Image.Image:
+    mask_array = np.asarray(mask.convert("L"), dtype=np.uint8)
+    _, image = cv2.threshold(mask_array, 30, 255, cv2.THRESH_BINARY)
+    skeleton = np.zeros(image.shape, dtype=np.uint8)
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    for _ in range(2048):
+        eroded = cv2.erode(image, element)
+        opened = cv2.dilate(eroded, element)
+        skeleton = cv2.bitwise_or(skeleton, cv2.subtract(image, opened))
+        image = eroded
+        if cv2.countNonZero(image) == 0:
+            break
+    skeleton = cv2.dilate(skeleton, element, iterations=1)
+    canvas = np.full((*skeleton.shape, 3), 255, dtype=np.uint8)
+    canvas[skeleton > 0] = (18, 18, 18)
+    return Image.fromarray(canvas, "RGB")
+
+
+def _prepare_flux_reference_image(
+    *,
+    channel: str,
+    files: dict[str, str],
+    output_dir: Path,
+    view_id: str,
+    size: tuple[int, int],
+) -> tuple[Image.Image, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{view_id}_{channel}.png"
+    if channel == "skeleton":
+        source = files.get("skeleton") or files.get("mask")
+        if not source:
+            raise RuntimeError("Flux2 Klein skeleton reference needs either skeleton or mask render channel.")
+        image = _skeleton_from_mask(_open_rgb(source).resize(size, Image.Resampling.LANCZOS))
+    else:
+        source = files.get(channel)
+        if not source:
+            raise RuntimeError(f"Flux2 Klein reference channel {channel!r} is missing from render manifest.")
+        image = _open_rgb(source).resize(size, Image.Resampling.LANCZOS)
+        if channel in {"depth", "edge", "mask"}:
+            image = ImageOps.autocontrast(image.convert("L")).convert("RGB")
+    image.save(output)
+    return image, output
+
+
+def _appearance_reference_list(
+    cfg: dict[str, Any],
+    appearance_reference: str | Path | None,
+    appearance_reference_images: list[str | Path] | tuple[str | Path, ...] | None,
+) -> list[Path]:
+    raw_items: list[str | Path] = []
+    if cfg.get("appearance_reference"):
+        raw_items.append(cfg["appearance_reference"])
+    raw_cfg_images = cfg.get("appearance_reference_images") or []
+    if isinstance(raw_cfg_images, str):
+        raw_items.append(raw_cfg_images)
+    else:
+        raw_items.extend(raw_cfg_images)
+    if appearance_reference:
+        raw_items.append(appearance_reference)
+    if appearance_reference_images:
+        raw_items.extend(appearance_reference_images)
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        path = Path(item).expanduser().resolve()
+        key = str(path)
+        if key in seen:
+            continue
+        if not path.exists():
+            raise RuntimeError(f"Flux2 Klein appearance reference does not exist: {path}")
+        if not path.is_file():
+            raise RuntimeError(f"Flux2 Klein appearance reference is not a file: {path}")
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def _prepare_flux_appearance_references(
+    *,
+    paths: list[Path],
+    output_dir: Path,
+    size: tuple[int, int],
+) -> tuple[list[Image.Image], list[str]]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    images: list[Image.Image] = []
+    copied_paths: list[str] = []
+    for index, source in enumerate(paths):
+        image = _open_rgb(source).resize(size, Image.Resampling.LANCZOS)
+        output = output_dir / f"appearance_reference_{index:02d}.png"
+        image.save(output)
+        images.append(image)
+        copied_paths.append(str(output))
+    return images, copied_paths
+
+
+class Flux2KleinBackend:
+    name = "flux2-klein"
+
+    def _load_pipeline(
+        self,
+        *,
+        model_ref: str,
+        dtype: str,
+        device: str,
+        enable_model_cpu_offload: bool,
+    ) -> Any:
+        try:
+            import torch
+            from diffusers import Flux2KleinPipeline
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "Flux2 Klein backend requires torch, diffusers, transformers, and accelerate. "
+                "Install or upgrade the local AI environment before running Flux2 Klein."
+            ) from exc
+
+        cache_key = (str(model_ref), str(dtype), str(device), bool(enable_model_cpu_offload))
+        if cache_key in _FLUX2_PIPELINE_CACHE:
+            return _FLUX2_PIPELINE_CACHE[cache_key]
+        torch_dtype = _torch_dtype(dtype, torch, torch.bfloat16)
+        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
+        if Path(model_ref).exists():
+            load_kwargs["local_files_only"] = True
+        pipe = Flux2KleinPipeline.from_pretrained(model_ref, **load_kwargs)
+        if enable_model_cpu_offload and device.startswith("cuda") and hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
+        _FLUX2_PIPELINE_CACHE[cache_key] = pipe
+        return pipe
+
+    def _model_ref(self, model_ref: str, model_config: dict[str, Any] | None) -> str:
+        cfg = model_config or {}
+        resolved = model_ref or cfg.get("local_path") or cfg.get("model_path") or cfg.get("model_id")
+        if not resolved:
+            raise RuntimeError("Flux2 Klein backend needs model_ref, local_path, model_path, or model_id.")
+        if Path(str(resolved)).is_absolute() and not Path(str(resolved)).exists():
+            raise RuntimeError(f"Configured Flux2 Klein model path does not exist: {resolved}")
+        return str(resolved)
+
+    def _call(
+        self,
+        pipe: Any,
+        *,
+        prompt: str,
+        reference_images: list[Image.Image],
+        seed: int,
+        device: str,
+        width: int,
+        height: int,
+        steps: int,
+        guidance_scale: float,
+        max_sequence_length: int,
+    ) -> Image.Image:
+        import torch
+
+        generator_device = device.split(":")[0] if device.startswith("cuda") else device
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "height": height,
+            "width": width,
+            "num_inference_steps": steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "max_sequence_length": max_sequence_length,
+        }
+        if reference_images:
+            kwargs["image"] = reference_images[0] if len(reference_images) == 1 else reference_images
+        call_params = inspect.signature(pipe.__call__).parameters
+        kwargs = {key: value for key, value in kwargs.items() if key in call_params}
+        return pipe(**kwargs).images[0]
+
+    def generate_reference(
+        self,
+        output: str | Path,
+        *,
+        prompt: str,
+        seed: int,
+        model_ref: str,
+        model_config: dict[str, Any] | None = None,
+        device: str = "cuda:0",
+        dtype: str = "bfloat16",
+        steps: int = 4,
+        guidance_scale: float = 1.0,
+        width: int = 1024,
+        height: int = 1024,
+        max_sequence_length: int = 512,
+        enable_model_cpu_offload: bool = True,
+        **_: Any,
+    ) -> Path:
+        resolved_ref = self._model_ref(model_ref, model_config)
+        pipe = self._load_pipeline(
+            model_ref=resolved_ref,
+            dtype=dtype,
+            device=device,
+            enable_model_cpu_offload=enable_model_cpu_offload,
+        )
+        image = self._call(
+            pipe,
+            prompt=prompt,
+            reference_images=[],
+            seed=seed,
+            device=device,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            max_sequence_length=max_sequence_length,
+        )
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        return output_path
+
+    def generate(
+        self,
+        render_manifest_path: str | Path,
+        output_dir: str | Path,
+        *,
+        prompt: str,
+        candidates_per_view: int,
+        seed: int,
+        model_ref: str = "",
+        model_config: dict[str, Any] | None = None,
+        negative_prompt: str = "",
+        device: str = "cuda:0",
+        dtype: str = "bfloat16",
+        steps: int = 4,
+        guidance_scale: float = 1.0,
+        width: int = 1024,
+        height: int = 1024,
+        reference_channels: list[str] | tuple[str, ...] | None = None,
+        geometry_lock: bool = False,
+        mesh_position_lock: bool = False,
+        mesh_detail_lock: bool = False,
+        mesh_adaptive_lock: bool = False,
+        mesh_quality_lock: bool = False,
+        appearance_reference: str | Path | None = None,
+        appearance_reference_images: list[str | Path] | tuple[str | Path, ...] | None = None,
+        appearance_reference_order: str = "before",
+        detail_reference: str | Path | None = None,
+        max_sequence_length: int = 512,
+        enable_model_cpu_offload: bool | None = None,
+        **_: Any,
+    ) -> Path:
+        if steps < 1:
+            raise ValueError("Flux2 Klein rendering requires steps >= 1.")
+        if width < 64 or height < 64:
+            raise ValueError("Flux2 Klein rendering requires width/height >= 64.")
+        order = str((model_config or {}).get("appearance_reference_order", appearance_reference_order)).strip().lower()
+        if order not in {"before", "after"}:
+            raise ValueError("Flux2 Klein appearance_reference_order must be 'before' or 'after'.")
+
+        cfg = model_config or {}
+        resolved_ref = self._model_ref(model_ref, cfg)
+        channels = resolve_flux_reference_channels(cfg, reference_channels)
+        offload = bool(cfg.get("enable_model_cpu_offload", True) if enable_model_cpu_offload is None else enable_model_cpu_offload)
+        pipe = self._load_pipeline(
+            model_ref=resolved_ref,
+            dtype=dtype,
+            device=device,
+            enable_model_cpu_offload=offload,
+        )
+
+        manifest = read_manifest(render_manifest_path)
+        output = Path(output_dir)
+        refs_dir = output / "references"
+        direct_dir = output / "direct"
+        output.mkdir(parents=True, exist_ok=True)
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        direct_dir.mkdir(parents=True, exist_ok=True)
+        result: dict[str, Any] = {
+            "type": "ai_manifest",
+            "backend": self.name,
+            "model_ref": resolved_ref,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "reference_channels": channels,
+            "geometry_lock": geometry_lock,
+            "mesh_position_lock": mesh_position_lock,
+            "mesh_detail_lock": mesh_detail_lock,
+            "mesh_adaptive_lock": mesh_adaptive_lock,
+            "mesh_quality_lock": mesh_quality_lock,
+            "appearance_reference_order": order,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "max_sequence_length": max_sequence_length,
+            "candidates": [],
+        }
+        size = (width, height)
+        appearance_paths = _appearance_reference_list(cfg, appearance_reference, appearance_reference_images)
+        detail_reference_path = Path(detail_reference).expanduser().resolve() if detail_reference else (appearance_paths[-1] if appearance_paths else None)
+        appearance_images, appearance_reference_files = _prepare_flux_appearance_references(
+            paths=appearance_paths,
+            output_dir=refs_dir,
+            size=size,
+        )
+        if appearance_reference_files:
+            result["appearance_reference_files"] = appearance_reference_files
+        if detail_reference_path:
+            result["detail_reference_file"] = str(detail_reference_path)
+        for view in manifest.get("views", []):
+            files = view.get("files", {})
+            reference_images: list[Image.Image] = []
+            reference_paths: dict[str, str] = {}
+            for channel in channels:
+                image, path = _prepare_flux_reference_image(
+                    channel=channel,
+                    files=files,
+                    output_dir=refs_dir,
+                    view_id=view["view_id"],
+                    size=size,
+                )
+                reference_images.append(image)
+                reference_paths[channel] = str(path)
+            if order == "after":
+                ordered_reference_images = reference_images + [image.copy() for image in appearance_images]
+            else:
+                ordered_reference_images = [image.copy() for image in appearance_images] + reference_images
+            for candidate_index in range(candidates_per_view):
+                candidate_seed = seed + candidate_index + len(result["candidates"]) * 997
+                image = self._call(
+                    pipe,
+                    prompt=prompt,
+                    reference_images=ordered_reference_images,
+                    seed=candidate_seed,
+                    device=device,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    guidance_scale=guidance_scale,
+                    max_sequence_length=max_sequence_length,
+                )
+                view_dir = output / view["view_id"]
+                view_dir.mkdir(parents=True, exist_ok=True)
+                direct_path = direct_dir / f"{view['view_id']}_{candidate_index:02d}.png"
+                image.save(direct_path)
+                image_path = view_dir / f"candidate_{candidate_index:02d}.png"
+                if mesh_quality_lock:
+                    mesh_quality_lock_render(
+                        source_rgb=files["rgb"],
+                        source_mask=files["mask"],
+                        source_edge=files["edge"],
+                        ai_image=direct_path,
+                        output=image_path,
+                        detail_reference=detail_reference_path,
+                    )
+                elif mesh_adaptive_lock:
+                    mesh_adaptive_lock_render(
+                        source_rgb=files["rgb"],
+                        source_mask=files["mask"],
+                        source_edge=files["edge"],
+                        ai_image=direct_path,
+                        output=image_path,
+                        detail_reference=detail_reference_path,
+                    )
+                elif mesh_detail_lock:
+                    mesh_detail_lock_render(
+                        source_rgb=files["rgb"],
+                        source_mask=files["mask"],
+                        source_edge=files["edge"],
+                        ai_image=direct_path,
+                        output=image_path,
+                        detail_reference=detail_reference_path,
+                    )
+                elif mesh_position_lock:
+                    mesh_position_lock_render(
+                        source_rgb=files["rgb"],
+                        source_mask=files["mask"],
+                        source_edge=files["edge"],
+                        ai_image=direct_path,
+                        output=image_path,
+                    )
+                elif geometry_lock:
+                    geometry_lock_render(
+                        source_rgb=files["rgb"],
+                        source_mask=files["mask"],
+                        source_edge=files["edge"],
+                        ai_image=direct_path,
+                        output=image_path,
+                    )
+                else:
+                    image.save(image_path)
+                result["candidates"].append(
+                    {
+                        "view_id": view["view_id"],
+                        "candidate_id": f"{view['view_id']}_{candidate_index:02d}",
+                        "seed": candidate_seed,
+                        "file": str(image_path),
+                        "direct_file": str(direct_path),
+                        "source_files": files,
+                        "reference_channels": channels,
+                        "reference_files": reference_paths,
+                        "appearance_reference_files": appearance_reference_files,
+                        "detail_reference_file": str(detail_reference_path) if detail_reference_path else "",
                     }
                 )
         return write_manifest(output / "manifest.json", result)
@@ -696,14 +1238,20 @@ class HiDreamO1ImageBackend:
         return write_manifest(output / "manifest.json", result)
 
 
-def build_backend(name: str) -> MockImageBackend | DiffusersImageBackend | SDXLControlNetGeometryBackend | HiDreamO1ImageBackend:
+def build_backend(
+    name: str,
+) -> MockImageBackend | DiffusersImageBackend | DiffusersTextToImageBackend | SDXLControlNetGeometryBackend | Flux2KleinBackend | HiDreamO1ImageBackend:
     normalized = name.strip().lower()
     if normalized == "mock":
         return MockImageBackend()
     if normalized in {"diffusers", "diffusers-flux", "diffusers-img2img"}:
         return DiffusersImageBackend()
+    if normalized in {"diffusers-txt2img", "diffusers-text-to-image", "sdxl-turbo-reference"}:
+        return DiffusersTextToImageBackend()
     if normalized in {"sdxl-controlnet-geometry", "controlnet-geometry", "diffusers-sdxl-controlnet"}:
         return SDXLControlNetGeometryBackend()
+    if normalized in {"flux2-klein", "flux2-klein-diffusers", "diffusers-flux2-klein"}:
+        return Flux2KleinBackend()
     if normalized in {"hidream-o1-image", "hidream-o1", "hidream"}:
         return HiDreamO1ImageBackend()
     raise ValueError(f"Unknown AI backend: {name}")

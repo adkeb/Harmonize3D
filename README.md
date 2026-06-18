@@ -6,7 +6,16 @@ The current direction is MeshLock-MV: a lightweight mesh-guided Agent for struct
 
 ## Paper And Latest Results
 
-Latest paper artifact: [`reports/论文.docx`](reports/%E8%AE%BA%E6%96%87.docx).
+Latest paper artifact and source of truth: [`reports/论文.docx`](reports/%E8%AE%BA%E6%96%87.docx).
+
+Paper title: **Harmonize3D：面向 3D 结构约束与多视图一致性的本地 AI 渲染 Agent**  
+Subtitle: **从单对象闭环到模块化全场景生成流程的阶段性研究**  
+Author metadata in the paper: 徐洋 / 20300290037 / 计算机科学与技术专业 / 指导教师：徐志平 / 2026 年 6 月
+
+Markdown mirrors generated from the latest DOCX:
+
+- [`docs/harmonize3d_paper.md`](docs/harmonize3d_paper.md)
+- [`reports/Harmonize3D_Paper_Deliverable.md`](reports/Harmonize3D_Paper_Deliverable.md)
 
 The paper has been updated with the June 18, 2026 Auto Scene run. This run validates the full modular chain:
 
@@ -14,13 +23,17 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333` and multiview score of `0.789947`. The final image still fails the concept/final check on `white_hero_presence`, exposing the next engineering targets: flatter-screen mesh sanity checks, concept-aligned camera search, and stricter final-render adherence to the Blender white-model position.
+Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The concept/final comparison still fails `white_hero_presence`; the final image's central white subject ratio is about `0.000431`, far below the concept target. The next engineering targets are flatter-screen mesh sanity checks, concept-aligned camera search, and stricter final-render adherence to the Blender white-model position.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
 ![Latest concept vs white model vs final](docs/paper_assets/concept_vs_final.png)
 
 ![Latest final contact sheet](docs/paper_assets/final_contact_sheet.png)
+
+![Latest white-model hero view](docs/paper_assets/white_model_view_hero.png)
+
+![Latest final hero view](docs/paper_assets/final_view_hero.png)
 
 ## What It Does
 

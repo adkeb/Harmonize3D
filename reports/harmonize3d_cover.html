@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<style>
+
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap');
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    width: 794px; height: 1123px;
+    overflow: hidden;
+    background: #151C27;
+    font-family: 'EB Garamond', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+.page {
+    position: relative;
+    width: 794px; height: 1123px;
+    background: #151C27;
+    overflow: hidden;
+}
+
+html, body { background: #151C27; }
+.page { background: #151C27; display:flex; flex-direction:column;
+         align-items:center; justify-content:center; padding:60px 80px; }
+
+.org-name {
+    font-size: 9px; font-weight: 500; letter-spacing: 0.30em;
+    text-transform: uppercase; color: #EDE9E2; text-align:center;
+    opacity: 0.75; margin-bottom: 10px;
+}
+.org-rule {
+    width: 56px; height: 2px; background: #EDE9E2;
+    opacity: 0.35; margin: 0 auto 52px;
+}
+.title {
+    font-family: 'Playfair Display', Georgia, 'Times New Roman', serif;
+    font-weight: 700; font-size: 52px; line-height: 1.08;
+    color: #EDE9E2; text-align: center; letter-spacing: -0.015em;
+    max-width: 560px; word-wrap: break-word; margin-bottom: 18px;
+}
+.title-rule {
+    width: 44px; height: 2.5px; background: #EDE9E2;
+    opacity: 0.35; margin: 0 auto 20px;
+}
+.subtitle {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-style: italic; font-size: 14px; color: #8A9AB0;
+    text-align: center; line-height: 1.5; max-width: 440px;
+    margin: 0 auto;
+}
+.separator {
+    width: 100%; max-width: 620px; height: 1px;
+    background: #EDE9E2; opacity: 0.12;
+    margin: 28px auto;
+}
+.author-name {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 16px; font-weight: 700; color: #EDE9E2;
+    text-align: center; margin-bottom: 6px;
+}
+.date-line {
+    font-size: 11px; color: #8A9AB0; text-align: center;
+    letter-spacing: 0.03em;
+}
+</style>
+</head>
+<body>
+<div class="page">
+    <div class="org-name">DARKROOM</div>
+    <div class="org-rule"></div>
+    <div class="title">Harmonize3D 技术流程与效果报告</div>
+    <div class="title-rule"></div>
+    <div class="subtitle">本地 3D AI 生成、交互定帧、几何约束渲染与 Agent 自动调优</div>
+    
+        <div style="text-align:center;margin:32px 0 28px;">
+            <img src="file:///root/sakura/work/Harmonize3D/outputs/stage-workbench/ai-render-20260612-165711-039/agent/final.png" style="max-width:340px;max-height:220px;
+                 object-fit:cover;display:inline-block;
+                 filter:grayscale(20%) brightness(0.9);"/>
+        </div>
+    
+        <div style="font-size:11px;line-height:1.7;color:#8A9AB0;
+                    text-align:justify;max-width:560px;margin:0 auto 0;">
+            <span style="font-weight:700;color:#4A6FA5;">Abstract:</span>
+            本报告梳理 Harmonize3D 本地分阶段 3D AI 工作台的完整技术流程，包括 Hunyuan3D 白模生成、Three.js 交互定帧、Blender 固定视角通道渲染、HiDream/Agent 几何约束渲染，以及当前验证效果。
+        </div>
+    <div class="separator"></div>
+    <div class="author-name">Codex / Harmonize3D</div>
+    <div class="date-line">2026-06-12</div>
+</div>
+</body></html>

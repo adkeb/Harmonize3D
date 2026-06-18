@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import itertools
 import math
 import shutil
 import time
@@ -16,12 +17,14 @@ from .ai.backends import build_backend
 from .ai.geometry import create_comparison_image
 from .config import load_config
 from .manifest import read_manifest, write_manifest
+from .scoring_v2 import DEFAULT_STRUCTURE_WEIGHTS, score_structure_v2
 
 
 Progress = Callable[[str, str, float], None]
 
-DEFAULT_REFERENCE_CHANNELS = ("rgb", "edge")
-DEFAULT_EXPAND_VIEW_IDS = ("view_01", "view_05", "view_06")
+DEFAULT_MODEL_KEY = "flux2_klein_4b"
+DEFAULT_REFERENCE_CHANNELS = ("rgb", "edge", "depth", "normal", "mask", "skeleton")
+DEFAULT_EXPAND_VIEW_IDS = ("view_locked", "view_left_30", "view_right_30")
 
 
 @dataclass
@@ -30,10 +33,10 @@ class AgentRunOptions:
     output_dir: Path
     prompt: str
     config_path: Path = Path("configs/local.json")
-    model_key: str = "hidream_o1_image_full"
+    model_key: str = DEFAULT_MODEL_KEY
     backend: str | None = None
     model_ref: str | None = None
-    target_view: str = "view_05"
+    target_view: str = "view_locked"
     max_generations: int = 10
     seed: int = 20260610
     expand_views: bool = True
@@ -52,6 +55,11 @@ class AgentRunOptions:
     steps: int | None = None
     width: int | None = None
     height: int | None = None
+    geometry_lock: bool | None = None
+    mesh_position_lock: bool | None = None
+    mesh_detail_lock: bool | None = None
+    mesh_adaptive_lock: bool | None = None
+    mesh_quality_lock: bool | None = None
 
 
 @dataclass
@@ -66,7 +74,7 @@ class AgentTrial:
     guidance_scale: float
     output_file: str
     score_file: str
-    scores: dict[str, float]
+    scores: dict[str, Any]
     decision_reason: str
 
 
@@ -98,6 +106,14 @@ class AgentRunSummary:
     agent_report: str
     decision_notes: list[str]
     elapsed_seconds: float
+    model_key: str = ""
+    backend: str = ""
+    score_version: str = "structure_v2"
+    structure_scores: dict[str, Any] = field(default_factory=dict)
+    multiview_scores: dict[str, Any] = field(default_factory=dict)
+    retry_decisions: list[dict[str, Any]] = field(default_factory=list)
+    final_view_images: dict[str, str] = field(default_factory=dict)
+    multiview_contact_sheet: str = ""
 
 
 def _load_gray(path: str | Path, size: tuple[int, int] | None = None) -> np.ndarray:
@@ -199,19 +215,32 @@ def _background_cleanliness_score(image_path: str | Path, source_mask: np.ndarra
 def _view_features(image_path: str | Path, source_mask_path: str | Path) -> dict[str, float]:
     with Image.open(image_path) as image:
         size = image.size
+        arr = np.asarray(image.convert("RGB"), dtype=np.float32)
     candidate_mask = _foreground_mask_from_image(image_path, size=size)
     source_mask = _binary_mask(source_mask_path, size=size)
     mask = np.logical_or(candidate_mask, source_mask)
     edge_density = float(_edge_map(image_path, size=size).mean())
     if not mask.any():
-        return {"area_ratio": 0.0, "edge_density": edge_density, "center_x": 0.5, "center_y": 0.5}
+        return {
+            "area_ratio": 0.0,
+            "edge_density": edge_density,
+            "center_x": 0.5,
+            "center_y": 0.5,
+            "body_r": 0.0,
+            "body_g": 0.0,
+            "body_b": 0.0,
+        }
     ys, xs = np.where(mask)
     h, w = mask.shape
+    body_color = arr[mask].mean(axis=0) / 255.0
     return {
         "area_ratio": float(mask.mean()),
         "edge_density": edge_density,
         "center_x": float(xs.mean() / max(w - 1, 1)),
         "center_y": float(ys.mean() / max(h - 1, 1)),
+        "body_r": float(body_color[0]),
+        "body_g": float(body_color[1]),
+        "body_b": float(body_color[2]),
     }
 
 
@@ -219,35 +248,13 @@ def _score_candidate(
     *,
     candidate_path: str | Path,
     source_files: dict[str, str],
-    edge_weight: float,
-    mask_weight: float,
-    roughness_weight: float,
-    background_weight: float,
-) -> dict[str, float]:
-    with Image.open(candidate_path) as candidate_image:
-        size = candidate_image.size
-    source_edge = _edge_map(source_files["edge"], size=size)
-    candidate_edge = _edge_map(candidate_path, size=size)
-    source_mask = _binary_mask(source_files["mask"], size=size)
-    candidate_mask = _foreground_mask_from_image(candidate_path, size=size)
-    edge_score = _tolerant_edge_f1(source_edge, candidate_edge)
-    mask_score = _mask_iou(source_mask, candidate_mask)
-    roughness = _roughness_score(candidate_path, source_mask)
-    background = _background_cleanliness_score(candidate_path, source_mask)
-    weight_sum = edge_weight + mask_weight + roughness_weight + background_weight
-    total = (
-        edge_weight * edge_score
-        + mask_weight * mask_score
-        + roughness_weight * roughness
-        + background_weight * background
-    ) / max(weight_sum, 1e-6)
-    return {
-        "edge_f1": round(_clamp01(edge_score), 6),
-        "mask_iou": round(_clamp01(mask_score), 6),
-        "roughness": round(_clamp01(roughness), 6),
-        "background_cleanliness": round(_clamp01(background), 6),
-        "total": round(_clamp01(total), 6),
-    }
+    structure_weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    return score_structure_v2(
+        candidate_path=candidate_path,
+        source_files=source_files,
+        weights=structure_weights,
+    )
 
 
 def _choose_view(manifest: dict[str, Any], preferred_view_id: str) -> dict[str, Any]:
@@ -290,6 +297,32 @@ def _write_single_view_manifest(source_manifest: dict[str, Any], view: dict[str,
 
 def _prompt_variant(base_prompt: str, variant: str) -> str:
     base = base_prompt.strip()
+    scene_mode = any(token in base.lower() for token in ("assembled 3d scene", "multi-module", "scene layout", "booth", "showroom", "exhibition"))
+    if scene_mode:
+        variants = {
+            "product_quality": (
+                "Render the exact same multi-object scene shown in the reference channels. Preserve every module, "
+                "including the hero vehicle, platform, screens, robotic arms, light strips, floor plane, camera angle, "
+                "scale relationships, and visible silhouettes. Produce a premium commercial CGI scene render with "
+                "clean materials, crisp reflections, controlled futuristic lighting, and no layout changes. LED screens "
+                "must remain blank abstract blue glow panels with no readable text, letters, numbers, UI, icons, people, "
+                "portraits, logos, or interface graphics."
+            ),
+            "clean_studio": (
+                "Create a clean high-end visualization of the entire assembled scene, not an isolated object. Keep all "
+                "reference modules visible in their original positions and proportions. Use polished showroom materials, "
+                "cool accent lights, a tidy reflective floor, blank abstract screen glow, and a professional uncluttered background."
+            ),
+            "geometry_first": (
+                "Scene geometry preservation is the highest priority. Do not remove the screens, platform, robotic arms, "
+                "light strips, or floor. Do not crop into a single object. Only improve materials, lighting, reflections, "
+                "and render polish while respecting every contour and placement from the render channels. Do not invent "
+                "screen UI, text, people, icons, numbers, or logos."
+            ),
+        }
+        if base:
+            return f"{base}\n\n{variants[variant]}"
+        return variants[variant]
     variants = {
         "product_quality": (
             "Render the exact same 3D object shown in the reference images. Preserve the silhouette, "
@@ -319,7 +352,7 @@ def _prompt_variant(base_prompt: str, variant: str) -> str:
 def _negative_prompt(configured: str) -> str:
     parts = [
         configured.strip(),
-        "geometry drift, changed silhouette, extra parts, missing parts, closed holes, warped body, noisy texture, gritty surface, low resolution, blur, text, watermark, logo",
+        "geometry drift, changed silhouette, extra parts, missing parts, closed holes, warped body, noisy texture, gritty surface, low resolution, blur, readable text, letters, numbers, UI, icons, people, portraits, watermark, logo",
     ]
     return ", ".join(part for part in parts if part)
 
@@ -341,6 +374,7 @@ def _generation_kwargs(
     guidance_scale: float,
 ) -> dict[str, Any]:
     ai_cfg = config.get("ai", {})
+    geometry_lock = bool(model_cfg.get("geometry_lock", True)) if options.geometry_lock is None else bool(options.geometry_lock)
     return {
         "prompt": prompt,
         "negative_prompt": _negative_prompt(options.negative_prompt or model_cfg.get("negative_prompt", "")),
@@ -358,18 +392,29 @@ def _generation_kwargs(
         "height": options.height if options.height is not None else int(model_cfg.get("height", ai_cfg.get("height", 2048))),
         "canny_scale": float(model_cfg.get("canny_scale", 2.85)),
         "depth_scale": float(model_cfg.get("depth_scale", 0.55)),
+        "control_channels": list(model_cfg.get("control_channels", ["canny", "depth"])),
+        "reference_channels": list(model_cfg.get("reference_channels", [])),
         "control_only": bool(model_cfg.get("control_only", True)),
-        "geometry_lock": bool(model_cfg.get("geometry_lock", True)),
+        "geometry_lock": geometry_lock,
+        "mesh_position_lock": bool(options.mesh_position_lock) if options.mesh_position_lock is not None else bool(model_cfg.get("mesh_position_lock", False)),
+        "mesh_detail_lock": bool(options.mesh_detail_lock) if options.mesh_detail_lock is not None else bool(model_cfg.get("mesh_detail_lock", False)),
+        "mesh_adaptive_lock": bool(options.mesh_adaptive_lock) if options.mesh_adaptive_lock is not None else bool(model_cfg.get("mesh_adaptive_lock", False)),
+        "mesh_quality_lock": bool(options.mesh_quality_lock) if options.mesh_quality_lock is not None else bool(model_cfg.get("mesh_quality_lock", False)),
+        "max_sequence_length": int(model_cfg.get("max_sequence_length", 512)),
     }
 
 
-def _trial_decision(scores: dict[str, float], pass_threshold: float) -> str:
+def _trial_decision(scores: dict[str, Any], pass_threshold: float) -> str:
     if scores["total"] >= pass_threshold:
-        return "passes single-view quality threshold"
-    if scores["roughness"] < 0.55 or scores["background_cleanliness"] < 0.55:
-        return "roughness/background penalty triggered a cleaner prompt trial"
-    if scores["edge_f1"] < 0.18 or scores["mask_iou"] < 0.42:
-        return "geometry drift triggered a geometry-first prompt trial"
+        return "passes structure quality threshold"
+    if scores.get("added_part_penalty", 0.0) > 0.15:
+        return "added part penalty triggered geometry-first retry"
+    if scores.get("silhouette_iou", scores.get("mask_iou", 0.0)) < 0.75:
+        return "silhouette mismatch triggered geometry-first retry"
+    if scores.get("edge_chamfer_score", 0.0) < 0.65:
+        return "edge chamfer drift triggered canny-guided retry"
+    if scores.get("roughness", 0.0) < 0.55 or scores.get("background_cleanliness", 0.0) < 0.55:
+        return "roughness/background penalty triggered cleaner prompt retry"
     return "below threshold, keeping best candidate for review"
 
 
@@ -386,6 +431,7 @@ def _run_trial(
     prompt_variant: str,
     guidance_scale: float,
     seed: int,
+    structure_weights: dict[str, float] | None = None,
 ) -> AgentTrial:
     trial_id = f"trial_{trial_number:02d}_{view['view_id']}_{prompt_variant}"
     trial_dir = output_dir / "agent_trials" / trial_id
@@ -412,10 +458,7 @@ def _run_trial(
     scores = _score_candidate(
         candidate_path=candidate["file"],
         source_files=view["files"],
-        edge_weight=options.edge_weight,
-        mask_weight=options.mask_weight,
-        roughness_weight=options.roughness_weight,
-        background_weight=options.background_weight,
+        structure_weights=structure_weights,
     )
     score_report = {
         "type": "agent_score",
@@ -424,10 +467,7 @@ def _run_trial(
         "candidate": candidate,
         "scores": scores,
         "weights": {
-            "edge_weight": options.edge_weight,
-            "mask_weight": options.mask_weight,
-            "roughness_weight": options.roughness_weight,
-            "background_weight": options.background_weight,
+            "structure_v2": structure_weights or DEFAULT_STRUCTURE_WEIGHTS,
         },
     }
     score_path = write_manifest(trial_dir / "agent_score.json", score_report)
@@ -454,19 +494,37 @@ def _run_trial(
     )
 
 
-def _consistency_score(items: list[dict[str, Any]]) -> float:
+def _multiview_consistency_scores(items: list[dict[str, Any]]) -> dict[str, float]:
     if len(items) <= 1:
-        return 1.0
+        return {
+            "body_color_consistency": 1.0,
+            "mask_edge_feature_consistency": 1.0,
+            "total": 1.0,
+        }
     features = [item["features"] for item in items]
     ref = features[0]
-    scores: list[float] = []
+    shape_scores: list[float] = []
+    color_scores: list[float] = []
     for feature in features[1:]:
         area = 1.0 - min(abs(feature["area_ratio"] - ref["area_ratio"]) / max(ref["area_ratio"], 0.02), 1.0)
         edge = 1.0 - min(abs(feature["edge_density"] - ref["edge_density"]) / max(ref["edge_density"], 0.01), 1.0)
         center_dist = math.hypot(feature["center_x"] - ref["center_x"], feature["center_y"] - ref["center_y"])
         center = 1.0 - min(center_dist / 0.25, 1.0)
-        scores.append((area + edge + center) / 3.0)
-    return round(_clamp01(float(np.mean(scores))), 6)
+        color_dist = math.sqrt(
+            (feature["body_r"] - ref["body_r"]) ** 2
+            + (feature["body_g"] - ref["body_g"]) ** 2
+            + (feature["body_b"] - ref["body_b"]) ** 2
+        )
+        shape_scores.append((area + edge + center) / 3.0)
+        color_scores.append(1.0 - min(color_dist / 0.35, 1.0))
+    body_color = _clamp01(float(np.mean(color_scores)))
+    mask_edge = _clamp01(float(np.mean(shape_scores)))
+    total = _clamp01(0.55 * body_color + 0.45 * mask_edge)
+    return {
+        "body_color_consistency": round(body_color, 6),
+        "mask_edge_feature_consistency": round(mask_edge, 6),
+        "total": round(total, 6),
+    }
 
 
 def _make_contact_sheet(items: list[dict[str, Any]], output: Path) -> Path:
@@ -489,6 +547,50 @@ def _make_contact_sheet(items: list[dict[str, Any]], output: Path) -> Path:
     return output
 
 
+def _trial_item(trial: AgentTrial, view_files: dict[str, dict[str, str]]) -> dict[str, Any]:
+    return {
+        "view_id": trial.view_id,
+        "trial_id": trial.trial_id,
+        "image": trial.output_file,
+        "scores": trial.scores,
+        "features": _view_features(trial.output_file, view_files[trial.view_id]["mask"]),
+    }
+
+
+def _select_multiview_combo(
+    *,
+    view_group: list[dict[str, Any]],
+    trials_by_view: dict[str, list[AgentTrial]],
+    view_files: dict[str, dict[str, str]],
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    candidate_lists: list[list[AgentTrial]] = []
+    for view in view_group:
+        candidates = trials_by_view.get(view["view_id"], [])
+        if not candidates:
+            continue
+        candidate_lists.append(candidates)
+    if not candidate_lists:
+        return [], _multiview_consistency_scores([])
+
+    best_items: list[dict[str, Any]] = []
+    best_scores: dict[str, float] = {}
+    best_value = -1.0
+    for combo in itertools.product(*candidate_lists):
+        items = [_trial_item(trial, view_files) for trial in combo]
+        multiview_scores = _multiview_consistency_scores(items)
+        mean_structure = float(np.mean([float(trial.scores["total"]) for trial in combo]))
+        selection_score = 0.65 * mean_structure + 0.35 * multiview_scores["total"]
+        if selection_score > best_value:
+            best_value = selection_score
+            best_items = items
+            best_scores = {
+                **multiview_scores,
+                "mean_structure": round(_clamp01(mean_structure), 6),
+                "selection_score": round(_clamp01(selection_score), 6),
+            }
+    return best_items, best_scores
+
+
 def _serializable_trial(trial: AgentTrial) -> dict[str, Any]:
     return asdict(trial)
 
@@ -503,9 +605,15 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
     output_dir.mkdir(parents=True, exist_ok=True)
     config = load_config(options.config_path)
     agent_cfg = config.get("agent", {})
-    model_key = options.model_key or "hidream_o1_image_full"
+    ai_cfg = config.get("ai", {})
+    model_key = (
+        options.model_key
+        or agent_cfg.get("default_model_key")
+        or ai_cfg.get("default_model_key")
+        or DEFAULT_MODEL_KEY
+    )
     model_cfg = _model_config(config, model_key)
-    configured_channels = tuple(agent_cfg.get("default_reference_channels", options.default_reference_channels))
+    configured_channels = tuple(options.default_reference_channels or agent_cfg.get("default_reference_channels", DEFAULT_REFERENCE_CHANNELS))
     model_cfg["reference_channels"] = list(configured_channels or options.default_reference_channels)
     backend_name = options.backend or model_cfg.get("backend") or config.get("ai", {}).get("default_backend", "mock")
     backend = build_backend(backend_name)
@@ -513,68 +621,38 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
     source_model_path = str(source_manifest.get("source", ""))
     target_view = _choose_view(source_manifest, options.target_view)
     max_generations = max(1, int(options.max_generations))
+    candidates_per_view = max(1, int(agent_cfg.get("candidates_per_view", 3)))
+    score_cfg = config.get("score", {})
+    score_version = str(score_cfg.get("version", "structure_v2"))
+    structure_weights = {**DEFAULT_STRUCTURE_WEIGHTS, **dict(score_cfg.get("structure_v2", {}))}
+    view_group = (
+        _expand_view_list(source_manifest, target_view["view_id"], options.expand_view_ids)
+        if options.expand_views
+        else [target_view]
+    )
     notes: list[str] = [
         f"Using backend={backend_name}, model_key={model_key}, reference_channels={model_cfg['reference_channels']}.",
         f"AI references are restricted to Blender render channels from source_model_path={source_model_path}.",
-        "Depth/normal channels are disabled by default for Agent v1.",
+        f"Score version={score_version}; structure scoring checks silhouette, edge alignment, added parts, roughness, and background cleanliness.",
     ]
 
     trials: list[AgentTrial] = []
+    base_guidance = float(model_cfg.get("guidance_scale", config.get("ai", {}).get("guidance_scale", 2.2)))
     trial_specs = [
-        ("product_quality", float(model_cfg.get("guidance_scale", config.get("ai", {}).get("guidance_scale", 2.2)))),
-        ("clean_studio", 1.8),
-        ("geometry_first", 1.5),
+        ("product_quality", base_guidance),
+        ("clean_studio", max(1.0, base_guidance * 0.85)),
+        ("geometry_first", max(1.0, base_guidance * 0.70)),
     ]
-    emit(f"Target view selected: {target_view['view_id']}", 0.04)
-    for index, (variant, guidance) in enumerate(trial_specs[:max_generations], start=1):
-        if index > 1 and trials:
-            best_so_far = max(trials, key=lambda item: item.scores["total"])
-            if best_so_far.scores["total"] >= options.pass_threshold and best_so_far.scores["roughness"] >= 0.55:
-                notes.append(f"Stopped single-view search after {best_so_far.trial_id}; threshold passed.")
+    emit(f"Target view selected: {target_view['view_id']}; planning {len(view_group)} MeshLock views", 0.04)
+    for candidate_index in range(candidates_per_view):
+        variant, guidance = trial_specs[candidate_index % len(trial_specs)]
+        for view_index, view in enumerate(view_group):
+            if len(trials) >= max_generations:
+                notes.append("Stopped candidate search at max generation budget.")
                 break
-            if variant == "geometry_first" and best_so_far.scores["edge_f1"] >= 0.18 and best_so_far.scores["mask_iou"] >= 0.42:
-                notes.append("Skipped geometry-first retry because geometry drift metrics were acceptable.")
-                break
-        emit(f"Running {variant} trial on {target_view['view_id']}", 0.06 + index * 0.16)
-        trial = _run_trial(
-            backend=backend,
-            source_manifest=source_manifest,
-            view=target_view,
-            output_dir=output_dir,
-            config=config,
-            model_cfg=model_cfg,
-            options=options,
-            trial_number=index,
-            prompt_variant=variant,
-            guidance_scale=guidance,
-            seed=options.seed + (index - 1) * 997,
-        )
-        trials.append(trial)
-        notes.append(f"{trial.trial_id}: total={trial.scores['total']} reason={trial.decision_reason}.")
-
-    selected = max(trials, key=lambda item: item.scores["total"])
-    status = "complete" if selected.scores["total"] >= options.pass_threshold else "needs_review"
-    expanded: list[dict[str, Any]] = [
-        {
-            "view_id": selected.view_id,
-            "trial_id": selected.trial_id,
-            "image": selected.output_file,
-            "scores": selected.scores,
-            "features": _view_features(selected.output_file, target_view["files"]["mask"]),
-        }
-    ]
-
-    generations_used = len(trials)
-    if options.expand_views and status == "complete" and generations_used < max_generations:
-        expand_views = _expand_view_list(source_manifest, selected.view_id, options.expand_view_ids)
-        next_trial_number = len(trials) + 1
-        for view in expand_views:
-            if view["view_id"] == selected.view_id:
-                continue
-            if generations_used >= max_generations:
-                notes.append("Stopped view expansion at max generation budget.")
-                break
-            emit(f"Expanding selected policy to {view['view_id']}", 0.68 + min(0.24, generations_used * 0.05))
+            trial_number = len(trials) + 1
+            progress_fraction = 0.06 + 0.72 * (trial_number / max(max_generations, 1))
+            emit(f"Running {variant} trial on {view['view_id']}", min(progress_fraction, 0.82))
             trial = _run_trial(
                 backend=backend,
                 source_manifest=source_manifest,
@@ -583,33 +661,75 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
                 config=config,
                 model_cfg=model_cfg,
                 options=options,
-                trial_number=next_trial_number,
-                prompt_variant=selected.prompt_variant,
-                guidance_scale=selected.guidance_scale,
-                seed=options.seed + 5000 + generations_used * 997,
+                trial_number=trial_number,
+                prompt_variant=variant,
+                guidance_scale=guidance,
+                seed=options.seed + candidate_index * 997 + view_index * 10000,
+                structure_weights=structure_weights,
             )
             trials.append(trial)
-            generations_used += 1
-            next_trial_number += 1
-            expanded.append(
-                {
-                    "view_id": view["view_id"],
-                    "trial_id": trial.trial_id,
-                    "image": trial.output_file,
-                    "scores": trial.scores,
-                    "features": _view_features(trial.output_file, view["files"]["mask"]),
-                }
+            failures = trial.scores.get("failure_reasons") or []
+            notes.append(
+                f"{trial.trial_id}: total={trial.scores['total']} reason={trial.decision_reason}"
+                f" failures={failures}."
             )
+        if len(trials) >= max_generations:
+            break
 
-    consistency = _consistency_score(expanded)
+    if not trials:
+        raise RuntimeError("Agent produced no trials.")
+
+    trials_by_view: dict[str, list[AgentTrial]] = {}
+    for trial in trials:
+        trials_by_view.setdefault(trial.view_id, []).append(trial)
+    view_files = {view["view_id"]: view["files"] for view in source_manifest.get("views", [])}
+    expanded, multiview_scores = _select_multiview_combo(
+        view_group=view_group,
+        trials_by_view=trials_by_view,
+        view_files=view_files,
+    )
+    selected_by_view: dict[str, AgentTrial] = {
+        view_id: max(items, key=lambda item: float(item.scores["total"]))
+        for view_id, items in trials_by_view.items()
+    }
+    expanded_trial_ids = {item["trial_id"] for item in expanded}
+    selected_trials = [trial for trial in trials if trial.trial_id in expanded_trial_ids]
+    selected = next((trial for trial in selected_trials if trial.view_id == target_view["view_id"]), None)
+    if selected is None:
+        selected = selected_by_view.get(target_view["view_id"]) or max(trials, key=lambda item: float(item.scores["total"]))
+    if not expanded:
+        expanded = [
+            _trial_item(selected, view_files)
+        ]
+
+    structure_scores = {item["view_id"]: item["scores"] for item in expanded}
     if len(expanded) > 1:
-        notes.append(f"Three-view consistency proxy={consistency}.")
-        if consistency < 0.55:
+        notes.append(
+            "Selected multiview combination "
+            f"{[item['trial_id'] for item in expanded]} with selection_score={multiview_scores.get('selection_score')}."
+        )
+    status = "complete" if float(selected.scores["total"]) >= options.pass_threshold else "needs_review"
+    weak_views = [
+        item["view_id"]
+        for item in expanded
+        if float(item["scores"].get("total", 0.0)) < options.pass_threshold
+    ]
+    if weak_views:
+        status = "needs_review"
+        notes.append(f"Views below pass threshold: {weak_views}.")
+    if len(expanded) > 1:
+        notes.append(f"MeshLock multiview consistency={multiview_scores['total']}.")
+        if multiview_scores["total"] < 0.55:
             status = "needs_review"
-            notes.append("Expanded views failed the consistency proxy threshold.")
+            notes.append("Expanded views failed the multiview consistency threshold.")
 
     final_image = output_dir / "final.png"
     shutil.copy2(selected.output_file, final_image)
+    final_view_images: dict[str, str] = {}
+    for item in expanded:
+        view_final = output_dir / f"final_{item['view_id']}.png"
+        shutil.copy2(item["image"], view_final)
+        final_view_images[item["view_id"]] = str(view_final)
     comparison = create_comparison_image(
         white_image=target_view["files"]["rgb"],
         final_image=final_image,
@@ -617,7 +737,8 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
     )
     contact = ""
     if len(expanded) > 1:
-        contact = str(_make_contact_sheet(expanded, output_dir / "three_view_contact.png"))
+        contact = str(_make_contact_sheet(expanded, output_dir / "multiview_contact_sheet.png"))
+        shutil.copy2(contact, output_dir / "three_view_contact.png")
 
     decision = AgentDecision(
         status=status,
@@ -625,6 +746,16 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
         selected_score=selected.scores["total"],
         decision_notes=notes,
     )
+    retry_decisions = [
+        {
+            "trial_id": trial.trial_id,
+            "view_id": trial.view_id,
+            "total": trial.scores.get("total", 0.0),
+            "decision_reason": trial.decision_reason,
+            "failure_reasons": trial.scores.get("failure_reasons", []),
+        }
+        for trial in trials
+    ]
     report_path = output_dir / "agent_report.json"
     summary = AgentRunSummary(
         type="agent_run_summary",
@@ -639,6 +770,8 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
             "max_generations": max_generations,
             "generations_used": len(trials),
             "expand_views": options.expand_views,
+            "planned_views": [view["view_id"] for view in view_group],
+            "candidates_per_view": candidates_per_view,
             "pass_threshold": options.pass_threshold,
         },
         trials=[_serializable_trial(trial) for trial in trials],
@@ -653,6 +786,14 @@ def run_agent_render(options: AgentRunOptions, progress: Progress | None = None)
         agent_report=str(report_path),
         decision_notes=decision.decision_notes,
         elapsed_seconds=round(time.time() - started, 3),
+        model_key=model_key,
+        backend=backend_name,
+        score_version=score_version,
+        structure_scores=structure_scores,
+        multiview_scores=multiview_scores,
+        retry_decisions=retry_decisions,
+        final_view_images=final_view_images,
+        multiview_contact_sheet=contact,
     )
     with report_path.open("w", encoding="utf-8") as fh:
         json.dump(asdict(summary), fh, ensure_ascii=False, indent=2)

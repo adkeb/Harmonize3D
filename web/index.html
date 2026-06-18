@@ -26,6 +26,95 @@
           </button>
         </div>
 
+
+        <section class="stage-block" data-stage-block="auto">
+          <div class="stage-head">
+            <span class="step-index">A</span>
+            <div>
+              <h2>一句话自动生成</h2>
+              <p id="autoStatus">等待输入</p>
+            </div>
+          </div>
+          <label class="field">
+            <span>自然语言需求</span>
+            <textarea id="autoRequest" rows="4">生成一辆未来感白色电动跑车，放在灰色摄影棚中，从低角度三分之四前视角渲染三张产品图。</textarea>
+          </label>
+          <div class="number-grid">
+            <label class="field">
+              <span>来源</span>
+              <select id="autoSourceMode">
+                <option value="auto" selected>自动</option>
+                <option value="procedural">程序化验证</option>
+                <option value="model_path">已有模型</option>
+                <option value="image_to_3d">图片生成 3D</option>
+                <option value="text_to_3d">文本生成 3D</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>视图</span>
+              <select id="autoViews">
+                <option value="1">1</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="8">8</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>质量</span>
+              <select id="autoQuality">
+                <option value="fast">fast</option>
+                <option value="balanced" selected>balanced</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>几何</span>
+              <select id="autoGeometry">
+                <option value="loose">loose</option>
+                <option value="balanced">balanced</option>
+                <option value="strict" selected>strict</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>风格</span>
+              <select id="autoStyle">
+                <option value="product" selected>product</option>
+                <option value="cinematic">cinematic</option>
+                <option value="ecommerce">ecommerce</option>
+                <option value="concept">concept</option>
+                <option value="exhibition">exhibition</option>
+                <option value="architecture">architecture</option>
+                <option value="clay_to_material">clay_to_material</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>候选/视图</span>
+              <input id="autoCandidates" type="number" min="1" max="8" step="1" value="3" />
+            </label>
+            <label class="field">
+              <span>场景渲染</span>
+              <select id="autoSceneRenderBackend">
+                <option value="auto" selected>auto</option>
+                <option value="procedural">procedural</option>
+                <option value="blender">blender</option>
+              </select>
+            </label>
+          </div>
+          <label class="toggle-row">
+            <input id="autoDryRun" type="checkbox" checked />
+            <span>mock dry-run</span>
+          </label>
+          <button id="autoRunButton" class="primary-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 9-14 9V3z"/><path d="M4 4h4"/><path d="M4 20h4"/></svg>
+            <span>启动 Auto Agent</span>
+          </button>
+          <button id="autoSceneButton" class="secondary-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18"/><path d="M5 20V9l7-5 7 5v11"/><path d="M9 20v-6h6v6"/></svg>
+            <span>启动 Auto Scene</span>
+          </button>
+          <pre id="autoDetails" class="stage-details"></pre>
+        </section>
+
         <section class="stage-block" data-stage-block="source">
           <div class="stage-head">
             <span class="step-index">1</span>
@@ -161,8 +250,8 @@
             <label class="field">
               <span>AI 后端</span>
               <select id="aiBackend">
-                <option value="agent">HiDream Agent</option>
-                <option value="sdxl">SDXL ControlNet</option>
+                <option value="agent">MeshLock Agent (Flux2 Klein)</option>
+                <option value="flux2">Flux2 Klein</option>
                 <option value="mock">快速验证 mock</option>
               </select>
             </label>

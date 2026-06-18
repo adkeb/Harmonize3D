@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
 import importlib.util
 import subprocess
@@ -9,12 +10,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local3dai.agent import AgentRunOptions, run_agent_render
-from local3dai.ai.backends import MockImageBackend
+from local3dai.ai.backends import Flux2KleinBackend, MockImageBackend, resolve_flux_reference_channels, resolve_sdxl_control_channels
+from local3dai.ai.geometry import (
+    mesh_adaptive_lock_render,
+    mesh_detail_lock_render,
+    mesh_position_lock_render,
+    mesh_quality_lock_render,
+)
 from local3dai.camera import CameraState, camera_position
 from local3dai.modelgen import generate_3d_model
 from local3dai.rendering.blender import render_model_with_blender
 from local3dai.sample import create_sample_renders
 from local3dai.scoring import score_candidates
+from local3dai.scoring_v2 import score_structure_v2
 from local3dai.webapp import (
     JOBS,
     JOBS_LOCK,
@@ -22,12 +30,13 @@ from local3dai.webapp import (
     _append_log,
     _init_stage_states,
     _job_snapshot,
+    _read_multipart_upload,
     _run_hunyuan_shape_for_stage,
     _stage_ai_render,
     _stage_generate_3d,
     _stage_white_render,
 )
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 class PipelineTest(unittest.TestCase):
@@ -117,6 +126,321 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue((root / "score" / "ranked").exists())
             self.assertGreaterEqual(report["ranked"][0]["scores"]["total"], report["ranked"][-1]["scores"]["total"])
 
+    def test_agent_default_model_key_uses_flux2_klein(self) -> None:
+        self.assertEqual(AgentRunOptions(input_renders=Path("renders.json"), output_dir=Path("out"), prompt="x").model_key, "flux2_klein_4b")
+
+    def test_flux2_reference_channel_resolution_supports_text_only_and_render_channels(self) -> None:
+        self.assertEqual(resolve_flux_reference_channels({"reference_channels": []}), [])
+        self.assertEqual(resolve_flux_reference_channels({"reference_channels": ["white", "canny", "depth", "normal", "silhouette", "bone"]}), ["rgb", "edge", "depth", "normal", "mask", "skeleton"])
+        with self.assertRaises(RuntimeError):
+            resolve_flux_reference_channels({"reference_channels": ["pose"]})
+
+    def test_sdxl_control_channel_resolution_supports_canny_only_and_depth(self) -> None:
+        self.assertEqual(resolve_sdxl_control_channels({"control_channels": ["canny"]}), ["canny"])
+        self.assertEqual(resolve_sdxl_control_channels({"control_channels": ["canny", "depth"]}), ["canny", "depth"])
+        with self.assertRaises(RuntimeError):
+            resolve_sdxl_control_channels({"control_channels": ["normal"]})
+
+    def test_flux2_backend_passes_multiple_reference_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            render_manifest = self._write_fake_render_manifest(root / "renders")
+            fake_model = root / "flux2"
+            fake_model.mkdir()
+            appearance = root / "appearance.png"
+            Image.new("RGB", (64, 64), (200, 20, 30)).save(appearance)
+            detail = root / "detail.png"
+            Image.new("RGB", (64, 64), (20, 200, 30)).save(detail)
+            captured: list[dict[str, object]] = []
+
+            class FakePipe:
+                def to(self, device: str) -> None:
+                    captured.append({"to": device})
+
+                def __call__(
+                    self,
+                    *,
+                    image: object = None,
+                    prompt: str | None = None,
+                    height: int | None = None,
+                    width: int | None = None,
+                    num_inference_steps: int | None = None,
+                    guidance_scale: float | None = None,
+                    generator: object = None,
+                    max_sequence_length: int | None = None,
+                ) -> object:
+                    captured.append(
+                        {
+                            "image": image,
+                            "prompt": prompt,
+                            "height": height,
+                            "width": width,
+                            "steps": num_inference_steps,
+                            "guidance_scale": guidance_scale,
+                            "max_sequence_length": max_sequence_length,
+                        }
+                    )
+
+                    class Result:
+                        images = [Image.new("RGB", (64, 64), (40, 80, 140))]
+
+                    return Result()
+
+            with patch("diffusers.Flux2KleinPipeline.from_pretrained", return_value=FakePipe()):
+                manifest = Flux2KleinBackend().generate(
+                    render_manifest,
+                    root / "flux_candidates",
+                    prompt="clean render",
+                    candidates_per_view=1,
+                    seed=9,
+                    model_ref=str(fake_model),
+                    device="cpu",
+                    dtype="bfloat16",
+                    steps=4,
+                    guidance_scale=1.0,
+                    width=64,
+                    height=64,
+                    reference_channels=["rgb", "depth", "skeleton"],
+                    appearance_reference=appearance,
+                    appearance_reference_images=[detail],
+                    appearance_reference_order="after",
+                    detail_reference=detail,
+                    mesh_position_lock=True,
+                    geometry_lock=False,
+                )
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(data["backend"], "flux2-klein")
+            self.assertEqual(data["reference_channels"], ["rgb", "depth", "skeleton"])
+            self.assertEqual(data["appearance_reference_order"], "after")
+            self.assertTrue(data["mesh_position_lock"])
+            self.assertEqual(len(data["appearance_reference_files"]), 2)
+            self.assertEqual(data["detail_reference_file"], str(detail.resolve()))
+            call = next(item for item in captured if "image" in item)
+            self.assertIsInstance(call["image"], list)
+            self.assertEqual(len(call["image"]), 5)
+            self.assertEqual(call["image"][-2].getpixel((0, 0)), (200, 20, 30))
+            self.assertEqual(call["image"][-1].getpixel((0, 0)), (20, 200, 30))
+            refs = data["candidates"][0]["reference_files"]
+            self.assertTrue(Path(refs["skeleton"]).exists())
+            self.assertEqual(data["candidates"][0]["appearance_reference_files"], data["appearance_reference_files"])
+            self.assertEqual(data["candidates"][0]["detail_reference_file"], str(detail.resolve()))
+
+    def test_mesh_position_lock_clips_non_binary_mask_background(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            size = (96, 96)
+            source_rgb = Image.new("RGB", size, (72, 74, 76))
+            source_rgb.paste((230, 230, 232), (30, 30, 66, 66))
+            source_mask = Image.new("L", size, 63)
+            source_mask.paste(214, (30, 30, 66, 66))
+            source_edge = source_mask.filter(ImageFilter.FIND_EDGES)
+            ai = Image.new("RGB", size, (48, 50, 52))
+            ai.paste((230, 20, 20), (30, 30, 66, 66))
+            ai.paste((230, 20, 20), (70, 34, 90, 60))
+            paths = {}
+            for name, image in {
+                "rgb": source_rgb,
+                "mask": source_mask,
+                "edge": source_edge,
+                "ai": ai,
+            }.items():
+                path = root / f"{name}.png"
+                image.save(path)
+                paths[name] = path
+
+            output = mesh_position_lock_render(
+                source_rgb=paths["rgb"],
+                source_mask=paths["mask"],
+                source_edge=paths["edge"],
+                ai_image=paths["ai"],
+                output=root / "locked.png",
+            )
+            locked = Image.open(output).convert("RGB")
+            inside = locked.getpixel((48, 48))
+            outside_hallucination = locked.getpixel((80, 48))
+            self.assertGreater(inside[0], 140)
+            self.assertLess(outside_hallucination[0], 95)
+            self.assertLess(outside_hallucination[0] - outside_hallucination[1], 15)
+
+    def test_mesh_detail_lock_uses_mesh_edges_instead_of_shifted_ai_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            size = (96, 96)
+            source_rgb = Image.new("RGB", size, (70, 72, 74))
+            source_rgb.paste((220, 220, 222), (24, 24, 72, 72))
+            source_mask = Image.new("L", size, 63)
+            source_mask.paste(214, (24, 24, 72, 72))
+            source_edge = Image.new("L", size, 80)
+            for y in range(26, 70):
+                source_edge.putpixel((48, y), 235)
+            ai = Image.new("RGB", size, (48, 50, 52))
+            ai.paste((230, 25, 20), (24, 24, 72, 72))
+            for y in range(26, 70):
+                ai.putpixel((66, y), (0, 0, 0))
+                ai.putpixel((67, y), (0, 0, 0))
+            detail = Image.new("RGB", size, (180, 20, 18))
+            paths = {}
+            for name, image in {
+                "rgb": source_rgb,
+                "mask": source_mask,
+                "edge": source_edge,
+                "ai": ai,
+                "detail": detail,
+            }.items():
+                path = root / f"{name}.png"
+                image.save(path)
+                paths[name] = path
+
+            output = mesh_detail_lock_render(
+                source_rgb=paths["rgb"],
+                source_mask=paths["mask"],
+                source_edge=paths["edge"],
+                ai_image=paths["ai"],
+                output=root / "detail_locked.png",
+                detail_reference=paths["detail"],
+            )
+            locked = Image.open(output).convert("RGB")
+            shifted_ai_line = locked.getpixel((66, 48))
+            mesh_edge_line = locked.getpixel((48, 48))
+            self.assertGreater(shifted_ai_line[0], 80)
+            self.assertGreater(shifted_ai_line[0], shifted_ai_line[1] * 2)
+            self.assertLess(mesh_edge_line[0], shifted_ai_line[0])
+
+    def test_mesh_adaptive_lock_uses_generic_edge_drift_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            size = (96, 96)
+            source_rgb = Image.new("RGB", size, (70, 72, 74))
+            source_rgb.paste((220, 220, 222), (24, 24, 72, 72))
+            source_mask = Image.new("L", size, 63)
+            source_mask.paste(214, (24, 24, 72, 72))
+            source_edge = Image.new("L", size, 80)
+            for y in range(26, 70):
+                source_edge.putpixel((48, y), 235)
+            ai = Image.new("RGB", size, (48, 50, 52))
+            ai.paste((230, 25, 20), (24, 24, 72, 72))
+            for y in range(26, 70):
+                ai.putpixel((66, y), (0, 0, 0))
+                ai.putpixel((67, y), (0, 0, 0))
+            detail = Image.new("RGB", size, (180, 20, 18))
+            paths = {}
+            for name, image in {
+                "rgb": source_rgb,
+                "mask": source_mask,
+                "edge": source_edge,
+                "ai": ai,
+                "detail": detail,
+            }.items():
+                path = root / f"{name}.png"
+                image.save(path)
+                paths[name] = path
+
+            output = mesh_adaptive_lock_render(
+                source_rgb=paths["rgb"],
+                source_mask=paths["mask"],
+                source_edge=paths["edge"],
+                ai_image=paths["ai"],
+                output=root / "adaptive_locked.png",
+                detail_reference=paths["detail"],
+            )
+            locked = Image.open(output).convert("RGB")
+            shifted_ai_line = locked.getpixel((66, 48))
+            mesh_edge_line = locked.getpixel((48, 48))
+            self.assertGreater(shifted_ai_line[0], mesh_edge_line[0])
+            self.assertGreater(shifted_ai_line[0], shifted_ai_line[1] * 2)
+            self.assertLess(mesh_edge_line[0], shifted_ai_line[0])
+
+    def test_mesh_quality_lock_preserves_material_while_refining_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            size = (96, 96)
+            source_rgb = Image.new("RGB", size, (70, 72, 74))
+            source_rgb.paste((220, 220, 222), (24, 24, 72, 72))
+            source_mask = Image.new("L", size, 63)
+            source_mask.paste(214, (24, 24, 72, 72))
+            source_edge = Image.new("L", size, 80)
+            for y in range(26, 70):
+                source_edge.putpixel((48, y), 235)
+            ai = Image.new("RGB", size, (48, 50, 52))
+            ai.paste((230, 25, 20), (24, 24, 72, 72))
+            for y in range(26, 70):
+                ai.putpixel((66, y), (0, 0, 0))
+                ai.putpixel((67, y), (0, 0, 0))
+            detail = Image.new("RGB", size, (180, 20, 18))
+            paths = {}
+            for name, image in {
+                "rgb": source_rgb,
+                "mask": source_mask,
+                "edge": source_edge,
+                "ai": ai,
+                "detail": detail,
+            }.items():
+                path = root / f"{name}.png"
+                image.save(path)
+                paths[name] = path
+
+            output = mesh_quality_lock_render(
+                source_rgb=paths["rgb"],
+                source_mask=paths["mask"],
+                source_edge=paths["edge"],
+                ai_image=paths["ai"],
+                output=root / "quality_locked.png",
+                detail_reference=paths["detail"],
+            )
+            locked = Image.open(output).convert("RGB")
+            clean_body = locked.getpixel((36, 48))
+            shifted_ai_line = locked.getpixel((66, 48))
+            mesh_edge_line = locked.getpixel((48, 48))
+            self.assertGreater(clean_body[0], 150)
+            self.assertGreater(shifted_ai_line[0], 80)
+            self.assertGreater(shifted_ai_line[0], shifted_ai_line[1] * 2)
+            self.assertLess(mesh_edge_line[0], clean_body[0])
+
+    def test_structure_score_v2_penalizes_shift_added_parts_and_background_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            size = (96, 96)
+            source_mask = Image.new("L", size, 0)
+            for x in range(28, 68):
+                for y in range(26, 70):
+                    source_mask.putpixel((x, y), 255)
+            source_edge = source_mask.filter(ImageFilter.FIND_EDGES)
+            source_rgb = Image.new("RGB", size, (245, 245, 245))
+            source_rgb.paste((80, 80, 80), (28, 26, 68, 70))
+            files = {}
+            for name, image in {
+                "rgb": source_rgb,
+                "mask": source_mask.convert("RGB"),
+                "edge": source_edge.convert("RGB"),
+                "depth": source_mask.convert("RGB"),
+                "normal": source_rgb,
+            }.items():
+                path = root / f"{name}.png"
+                image.save(path)
+                files[name] = str(path)
+
+            def candidate(path: Path, box: tuple[int, int, int, int], *, extra: bool = False, noisy_bg: bool = False) -> Path:
+                image = Image.new("RGB", size, (245, 245, 245))
+                if noisy_bg:
+                    for x in range(0, 96, 4):
+                        for y in range(0, 96, 4):
+                            image.putpixel((x, y), (40, 40, 40))
+                image.paste((40, 70, 120), box)
+                if extra:
+                    image.paste((40, 70, 120), (72, 42, 88, 58))
+                image.save(path)
+                return path
+
+            perfect = score_structure_v2(candidate_path=candidate(root / "perfect.png", (28, 26, 68, 70)), source_files=files)
+            shifted = score_structure_v2(candidate_path=candidate(root / "shifted.png", (36, 26, 76, 70)), source_files=files)
+            added = score_structure_v2(candidate_path=candidate(root / "added.png", (28, 26, 68, 70), extra=True), source_files=files)
+            noisy = score_structure_v2(candidate_path=candidate(root / "noisy.png", (28, 26, 68, 70), noisy_bg=True), source_files=files)
+
+            self.assertGreater(perfect["silhouette_iou"], shifted["silhouette_iou"])
+            self.assertGreater(perfect["edge_chamfer_score"], shifted["edge_chamfer_score"])
+            self.assertGreater(added["added_part_penalty"], perfect["added_part_penalty"])
+            self.assertLess(noisy["background_cleanliness"], perfect["background_cleanliness"])
+
     def test_sample_model_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "generated.obj"
@@ -157,15 +481,21 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue((root / "agent" / "final.png").exists())
             self.assertTrue((root / "agent" / "white_vs_final.png").exists())
             self.assertTrue((root / "agent" / "three_view_contact.png").exists())
+            self.assertTrue((root / "agent" / "multiview_contact_sheet.png").exists())
             self.assertEqual(summary["source_model_path"], "synthetic_sample")
             self.assertEqual(summary["reference_policy"], "model_render_channels_only")
+            self.assertEqual(summary["model_key"], "flux2_klein_4b")
+            self.assertEqual(summary["backend"], "mock")
+            self.assertEqual(summary["score_version"], "structure_v2")
             self.assertEqual(summary["render_manifest"], str(render_manifest))
             self.assertGreaterEqual(len(summary["expanded_views"]), 2)
+            self.assertIn("structure_scores", summary)
+            self.assertIn("multiview_scores", summary)
+            self.assertIn("retry_decisions", summary)
             channels = [trial["reference_channels"] for trial in summary["trials"]]
-            self.assertTrue(all(channel_set == ["rgb", "edge"] for channel_set in channels))
-            selected_score = summary["selected_trial"]["scores"]["total"]
-            best_score = max(trial["scores"]["total"] for trial in summary["trials"] if trial["view_id"] == summary["target_view"])
-            self.assertEqual(selected_score, best_score)
+            self.assertTrue(all(channel_set == ["rgb", "edge", "depth", "normal", "mask", "skeleton"] for channel_set in channels))
+            expanded_trial_ids = {item["trial_id"] for item in summary["expanded_views"]}
+            self.assertIn(summary["selected_trial"]["trial_id"], expanded_trial_ids)
 
     def test_agent_render_single_view_when_threshold_not_met(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,8 +514,9 @@ class PipelineTest(unittest.TestCase):
                 )
             )
             self.assertEqual(summary["status"], "needs_review")
-            self.assertEqual(len(summary["expanded_views"]), 1)
-            self.assertFalse((root / "agent" / "three_view_contact.png").exists())
+            self.assertEqual(len(summary["expanded_views"]), 3)
+            self.assertTrue((root / "agent" / "three_view_contact.png").exists())
+            self.assertTrue((root / "agent" / "multiview_contact_sheet.png").exists())
 
     def test_web_job_tracks_independent_stages(self) -> None:
         job_id = "stage-test"
@@ -212,6 +543,24 @@ class PipelineTest(unittest.TestCase):
         finally:
             with JOBS_LOCK:
                 JOBS.pop(job_id, None)
+
+    def test_multipart_upload_parser_reads_file_field_without_cgi(self) -> None:
+        boundary = "----harmonize3d-test"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="reference image.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode("utf-8") + b"fake-png-bytes" + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        class Handler:
+            headers = {
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body)),
+            }
+            rfile = BytesIO(body)
+
+        upload = _read_multipart_upload(Handler())  # type: ignore[arg-type]
+        self.assertEqual(upload, ("reference image.png", b"fake-png-bytes"))
 
     def test_stage_generate_3d_existing_model_returns_web_url(self) -> None:
         result = _stage_generate_3d(
@@ -389,6 +738,38 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result["status"], "complete")
             self.assertTrue(Path(result["final_image"]).exists())
             self.assertTrue(Path(result["comparison_image"]).exists())
+
+    def test_stage_ai_render_agent_defaults_to_flux2_model_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            render_manifest = create_sample_renders(root / "renders", views=3, resolution=96)
+            captured: dict[str, object] = {}
+
+            def fake_agent(options: AgentRunOptions) -> dict[str, object]:
+                captured["model_key"] = options.model_key
+                captured["backend"] = options.backend
+                return {
+                    "status": "complete",
+                    "final_image": str(root / "final.png"),
+                    "comparison_image": str(root / "comparison.png"),
+                    "agent_report": str(root / "agent_report.json"),
+                    "multiview_contact_sheet": str(root / "multiview_contact_sheet.png"),
+                    "final_view_images": {"view_locked": str(root / "final_view_locked.png")},
+                }
+
+            with patch("local3dai.webapp.run_agent_render", side_effect=fake_agent):
+                result = _stage_ai_render(
+                    {
+                        "render_manifest": str(render_manifest),
+                        "prompt": "clean studio render",
+                        "agent_render": True,
+                        "backend": "mock",
+                        "seed": 12,
+                    }
+                )
+            self.assertEqual(captured["model_key"], "flux2_klein_4b")
+            self.assertEqual(captured["backend"], "mock")
+            self.assertEqual(result["summary"]["final_view_images"]["view_locked"], str(root / "final_view_locked.png"))
 
     def test_stage_ai_render_rejects_raw_reference_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

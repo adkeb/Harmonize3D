@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--camera-distance", type=float, default=3.2)
     parser.add_argument("--camera-json", default="", help="Optional fixed CameraState JSON or path. Renders one view_locked view.")
+    parser.add_argument("--preview-only", action="store_true", help="Render RGB previews only. Used for camera candidate selection.")
     return parser.parse_args(argv)
 
 
@@ -78,10 +79,19 @@ def normalize_model() -> None:
 
 def configure_scene(args: argparse.Namespace) -> None:
     scene = bpy.context.scene
-    try:
-        scene.render.engine = args.engine
-    except TypeError:
-        scene.render.engine = "CYCLES"
+    engine_candidates = [args.engine]
+    if args.engine == "BLENDER_EEVEE_NEXT":
+        engine_candidates.extend(["BLENDER_EEVEE", "CYCLES"])
+    elif args.engine == "BLENDER_EEVEE":
+        engine_candidates.extend(["BLENDER_EEVEE_NEXT", "CYCLES"])
+    else:
+        engine_candidates.append("CYCLES")
+    for engine in engine_candidates:
+        try:
+            scene.render.engine = engine
+            break
+        except TypeError:
+            continue
     if scene.render.engine == "CYCLES":
         scene.cycles.samples = args.samples
         scene.cycles.use_denoising = True
@@ -107,6 +117,19 @@ def make_camera(distance: float) -> bpy.types.Object:
     camera.data.ortho_scale = 2.7
     bpy.context.scene.camera = camera
     return camera
+
+
+def apply_camera_projection(camera: bpy.types.Object, camera_state: dict[str, object]) -> None:
+    camera_type = str(camera_state.get("camera_type", camera_state.get("type", "orthographic"))).lower()
+    camera.data.shift_x = float(camera_state.get("shift_x", 0.0) or 0.0)
+    camera.data.shift_y = float(camera_state.get("shift_y", 0.0) or 0.0)
+    if camera_type in {"perspective", "persp"}:
+        camera.data.type = "PERSP"
+        camera.data.lens = max(12.0, float(camera_state.get("focal_length_mm", camera_state.get("lens", 58.0))))
+        camera.data.sensor_width = max(12.0, float(camera_state.get("sensor_width_mm", 36.0)))
+    else:
+        camera.data.type = "ORTHO"
+        camera.data.ortho_scale = max(0.4, float(camera_state.get("ortho_scale", camera.data.ortho_scale)))
 
 
 def point_camera(camera: bpy.types.Object, target: Vector = Vector((0, 0, 0.05))) -> None:
@@ -327,14 +350,71 @@ def render_locked_view(
     camera_state: dict[str, object],
     base_distance: float,
     material_snapshot: dict[str, list[bpy.types.Material]],
+    *,
+    view_id: str = "view_locked",
+    yaw_offset_deg: float = 0.0,
 ) -> dict[str, str]:
-    camera.location = camera_position_from_state(camera_state, base_distance)
     target_values = camera_state.get("target", [0.0, 0.0, 0.05])
     if not isinstance(target_values, list | tuple) or len(target_values) != 3:
         target_values = [0.0, 0.0, 0.05]
-    camera.data.ortho_scale = max(0.4, float(camera_state.get("ortho_scale", camera.data.ortho_scale)))
-    point_camera(camera, Vector((float(target_values[0]), float(target_values[1]), float(target_values[2]))))
-    return render_channels("view_locked", output, camera, base_distance * max(0.25, float(camera_state.get("distance_scale", 1.0))) * 2.5, material_snapshot)
+    target = Vector((float(target_values[0]), float(target_values[1]), float(target_values[2])))
+    base_location = camera_position_from_state(camera_state, base_distance)
+    if yaw_offset_deg:
+        rel = base_location - target
+        angle = math.radians(yaw_offset_deg)
+        camera.location = target + Vector(
+            (
+                rel.x * math.cos(angle) - rel.y * math.sin(angle),
+                rel.x * math.sin(angle) + rel.y * math.cos(angle),
+                rel.z,
+            )
+        )
+    else:
+        camera.location = base_location
+    apply_camera_projection(camera, camera_state)
+    point_camera(camera, target)
+    return render_channels(view_id, output, camera, base_distance * max(0.25, float(camera_state.get("distance_scale", 1.0))) * 2.5, material_snapshot)
+
+
+def render_locked_rgb_preview(
+    output: Path,
+    camera: bpy.types.Object,
+    camera_state: dict[str, object],
+    base_distance: float,
+    material_snapshot: dict[str, list[bpy.types.Material]],
+    *,
+    view_id: str,
+) -> dict[str, str]:
+    target_values = camera_state.get("target", [0.0, 0.0, 0.05])
+    if not isinstance(target_values, list | tuple) or len(target_values) != 3:
+        target_values = [0.0, 0.0, 0.05]
+    target = Vector((float(target_values[0]), float(target_values[1]), float(target_values[2])))
+    camera.location = camera_position_from_state(camera_state, base_distance)
+    apply_camera_projection(camera, camera_state)
+    point_camera(camera, target)
+    restore_materials(material_snapshot)
+    bpy.context.scene.render.use_freestyle = False
+    view_dir = output / view_id
+    view_dir.mkdir(parents=True, exist_ok=True)
+    rgb_path = view_dir / "rgb.png"
+    save_render(rgb_path)
+    return {"rgb": str(rgb_path)}
+
+
+def camera_candidates_from_payload(camera_payload: dict[str, object]) -> list[dict[str, object]]:
+    raw_candidates = camera_payload.get("candidate_views")
+    if raw_candidates is None and camera_payload.get("mode") == "camera_search":
+        raw_candidates = camera_payload.get("views")
+    if not isinstance(raw_candidates, list):
+        return []
+    candidates: list[dict[str, object]] = []
+    for index, item in enumerate(raw_candidates):
+        if not isinstance(item, dict):
+            continue
+        candidate = dict(item)
+        candidate.setdefault("view_id", f"camera_candidate_{index:02d}")
+        candidates.append(candidate)
+    return candidates
 
 
 def main() -> None:
@@ -353,8 +433,63 @@ def main() -> None:
     manifest = {"type": "render_manifest", "source": str(args.model), "views": []}
     fixed_camera = load_camera_state(args.camera_json)
     if fixed_camera:
-        files = render_locked_view(output, camera, fixed_camera, args.camera_distance, material_snapshot)
-        manifest["views"].append({"view_id": "view_locked", "camera": fixed_camera, "files": files})
+        camera_candidates = camera_candidates_from_payload(fixed_camera)
+        if camera_candidates:
+            manifest["type"] = "camera_preview_manifest"
+            manifest["source"] = str(args.model)
+            for candidate in camera_candidates:
+                view_id = str(candidate.get("view_id", f"camera_candidate_{len(manifest['views']):02d}"))
+                files = render_locked_rgb_preview(
+                    output,
+                    camera,
+                    candidate,
+                    args.camera_distance,
+                    material_snapshot,
+                    view_id=view_id,
+                )
+                manifest["views"].append({"view_id": view_id, "camera": candidate, "files": files})
+        elif args.preview_only:
+            manifest["type"] = "camera_preview_manifest"
+            files = render_locked_rgb_preview(
+                output,
+                camera,
+                fixed_camera,
+                args.camera_distance,
+                material_snapshot,
+                view_id="view_locked",
+            )
+            manifest["views"].append({"view_id": "view_locked", "camera": fixed_camera, "files": files})
+        else:
+            locked_specs = [
+                ("view_locked", 0.0),
+                ("view_left_30", 30.0),
+                ("view_right_30", -30.0),
+            ]
+            for view_id, yaw_offset in locked_specs:
+                files = render_locked_view(
+                    output,
+                    camera,
+                    fixed_camera,
+                    args.camera_distance,
+                    material_snapshot,
+                    view_id=view_id,
+                    yaw_offset_deg=yaw_offset,
+                )
+                manifest["views"].append(
+                    {
+                        "view_id": view_id,
+                        "camera": fixed_camera,
+                        "yaw_offset_deg": yaw_offset,
+                        "files": files,
+                    }
+                )
+            manifest["view_graph"] = {
+                "edges": [
+                    {"source": "view_locked", "target": "view_left_30", "overlap_ratio": 0.66},
+                    {"source": "view_locked", "target": "view_right_30", "overlap_ratio": 0.66},
+                    {"source": "view_left_30", "target": "view_right_30", "overlap_ratio": 0.42},
+                ]
+            }
     else:
         for index in range(args.views):
             angle = math.tau * index / max(args.views, 1)

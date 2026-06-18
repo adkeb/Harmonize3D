@@ -15,6 +15,7 @@ const state = {
   viewer: null,
   busyStage: "",
   artifacts: {},
+  autoTaskId: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -63,6 +64,7 @@ function renderArtifactLinks() {
 
 function renderStageSummary() {
   const items = [
+    ["Auto", $("autoStatus")?.textContent || "等待输入"],
     ["3D", $("sourceStatus").textContent],
     ["相机", $("cameraStatus").textContent],
     ["白模", $("whiteStatus").textContent],
@@ -388,12 +390,165 @@ function lockCamera() {
   syncButtonState();
 }
 
+async function fetchJson(path) {
+  const response = await fetch(path);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || "request failed");
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+function autoLogText(job) {
+  const stages = job.stages || [];
+  const lines = stages
+    .filter((stage) => stage.status !== "pending" || stage.logs?.length)
+    .map((stage) => {
+      const latest = stage.logs?.[stage.logs.length - 1]?.message || stage.message || "";
+      const progress = Math.round((stage.progress || 0) * 100);
+      return `${stage.label || stage.id}: ${stage.status} ${progress}% ${latest}`.trim();
+    });
+  if (job.error) lines.push(`error: ${job.error}`);
+  return lines.join("\n");
+}
+
+async function applyAutoSummary(summary) {
+  if (!summary) return;
+  const urls = summary.artifact_urls || {};
+  const artifacts = summary.artifacts || {};
+  Object.entries(artifacts).forEach(([label, path]) => appendArtifact(label, path, urls[label]));
+  if (summary.model_path) {
+    state.modelPath = summary.model_path;
+    setText("activeModelPath", summary.model_path);
+    setText("modelTitle", "Auto Agent 3D 白模");
+  }
+  if (summary.render_manifest) state.renderManifest = summary.render_manifest;
+  if (summary.final_image && (urls.final_image || summary.final_image_url)) {
+    await setImage("finalImage", urls.final_image || summary.final_image_url);
+  }
+  if (summary.comparison_image && (urls.comparison_image || summary.comparison_image_url)) {
+    await setImage("comparisonImage", urls.comparison_image || summary.comparison_image_url);
+  }
+  if (summary.render_manifest) appendArtifact("auto render manifest", summary.render_manifest, urls.render_manifest);
+  if (summary.agent_report) {
+    appendArtifact("auto agent report", summary.agent_report, urls.agent_report);
+    $("reportLink").href = urls.agent_report || `/api/file?path=${encodeURIComponent(summary.agent_report)}`;
+  }
+}
+
+async function pollAutoRun(taskId) {
+  let job = null;
+  for (;;) {
+    job = await fetchJson(`/api/auto-run/${encodeURIComponent(taskId)}`);
+    setStageStatus("autoStatus", `${job.stage || "running"} · ${Math.round((job.progress || 0) * 100)}%`, "running");
+    setStageDetails("autoDetails", autoLogText(job));
+    if (["done", "complete", "needs_review", "failed"].includes(job.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  if (job.status === "failed") {
+    throw new Error(job.error || "Auto Agent failed");
+  }
+  await applyAutoSummary(job.summary);
+  setStageStatus("autoStatus", job.status === "needs_review" ? "Auto Agent 完成，需要复核" : "Auto Agent 完成", "complete");
+  return job;
+}
+
+async function applyAutoSceneSummary(summary = {}) {
+  const urls = summary.artifact_urls || {};
+  await applyAutoSummary(summary);
+  if (summary.global_concept) appendArtifact("global concept", summary.global_concept, urls.global_concept);
+  if (summary.scene_preview) appendArtifact("scene preview", summary.scene_preview, urls.scene_preview);
+  if (summary.scene_model_path) appendArtifact("final scene glb", summary.scene_model_path, urls.scene_model_path);
+  if (summary.scene_plan) appendArtifact("scene plan", summary.scene_plan, urls.scene_plan);
+  if (summary.module_plan) appendArtifact("module plan", summary.module_plan, urls.module_plan);
+  if (summary.module_asset_manifest) appendArtifact("module asset manifest", summary.module_asset_manifest, urls.module_asset_manifest);
+  if (summary.module_scores) appendArtifact("module scores", summary.module_scores, urls.module_scores);
+}
+
+async function pollAutoScene(taskId) {
+  let job = null;
+  for (;;) {
+    job = await fetchJson(`/api/auto-scene/${encodeURIComponent(taskId)}`);
+    setStageStatus("autoStatus", `${job.stage || "running"} · ${Math.round((job.progress || 0) * 100)}%`, "running");
+    setStageDetails("autoDetails", autoLogText(job));
+    if (["done", "complete", "needs_review", "failed"].includes(job.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  if (job.status === "failed") {
+    throw new Error(job.error || "Auto Scene failed");
+  }
+  await applyAutoSceneSummary(job.summary);
+  setStageStatus("autoStatus", job.status === "needs_review" ? "Auto Scene 完成，需要复核" : "Auto Scene 完成", "complete");
+  return job;
+}
+
+async function runAutoAgent() {
+  setBusy("auto", true);
+  setStageStatus("autoStatus", "Auto Agent 正在规划任务...", "running");
+  setStageDetails("autoDetails");
+  try {
+    const result = await apiJson("/api/auto-run", {
+      request: $("autoRequest").value.trim(),
+      source_mode: $("autoSourceMode").value,
+      model_path: $("autoSourceMode").value === "model_path" ? $("modelPath").value.trim() : "",
+      reference_image: $("autoSourceMode").value === "image_to_3d" ? $("referencePath").value.trim() : "",
+      output_views: Number($("autoViews").value),
+      quality_mode: $("autoQuality").value,
+      geometry_mode: $("autoGeometry").value,
+      style_preset: $("autoStyle").value,
+      num_candidates_per_view: numberValue("autoCandidates"),
+      max_retries: 2,
+      seed: numberValue("seed"),
+      backend: $("autoDryRun").checked ? "mock" : "",
+      dry_run: $("autoDryRun").checked,
+    });
+    state.autoTaskId = result.task_id;
+    await pollAutoRun(result.task_id);
+  } catch (error) {
+    setStageStatus("autoStatus", `失败：${error.message}`, "failed");
+    setStageDetails("autoDetails", formatApiError(error) || error.data?.traceback || "");
+  } finally {
+    setBusy("auto", false);
+  }
+}
+
+async function runAutoScene() {
+  setBusy("auto", true);
+  setStageStatus("autoStatus", "Auto Scene 正在规划模块化场景...", "running");
+  setStageDetails("autoDetails");
+  try {
+    const result = await apiJson("/api/auto-scene", {
+      request: $("autoRequest").value.trim(),
+      output_views: Number($("autoViews").value),
+      quality_mode: $("autoQuality").value,
+      geometry_mode: $("autoGeometry").value,
+      style_preset: $("autoStyle").value === "clay_to_material" ? "exhibition" : $("autoStyle").value,
+      num_candidates_per_view: numberValue("autoCandidates"),
+      max_retries: 2,
+      seed: numberValue("seed"),
+      allow_procedural_fallback: true,
+      render_backend: $("autoSceneRenderBackend").value,
+      backend: $("autoDryRun").checked ? "mock" : "",
+      dry_run: $("autoDryRun").checked,
+    });
+    state.autoTaskId = result.task_id;
+    await pollAutoScene(result.task_id);
+  } catch (error) {
+    setStageStatus("autoStatus", `失败：${error.message}`, "failed");
+    setStageDetails("autoDetails", formatApiError(error) || error.data?.traceback || "");
+  } finally {
+    setBusy("auto", false);
+  }
+}
+
 async function generate3D() {
   setBusy("source", true);
   const mode = $("sourceMode").value;
   const message =
     mode === "prompt_3d"
-      ? "正在调用 HiDream 生成参考图，然后调用 Hunyuan3D 2.1 生成白模..."
+      ? "正在调用 Flux2 Klein 生成参考图，然后调用 Hunyuan3D 2.1 生成白模..."
       : mode === "image_3d"
         ? "正在调用 Hunyuan3D 2.1 根据参考图生成白模..."
         : "正在载入 3D 白模...";
@@ -493,13 +648,13 @@ async function renderAI() {
       negative_prompt: $("negativePrompt").value.trim(),
       agent_render: backendMode === "agent",
       backend: backendMode === "mock" ? "mock" : "",
-      model_key: backendMode === "sdxl" ? "sdxl_controlnet_geometry" : "hidream_o1_image_full",
+      model_key: "flux2_klein_4b",
       max_generations: numberValue("agentBudget"),
       steps: numberValue("aiSteps"),
       width: numberValue("aiResolution"),
       height: numberValue("aiResolution"),
       seed: numberValue("seed"),
-      expand_views: false,
+      expand_views: true,
     });
     if (!result.final_image_url || !result.comparison_image_url) {
       throw new Error("AI 渲染完成但缺少最终图或对照图 URL");
@@ -510,6 +665,9 @@ async function renderAI() {
     if (result.agent_report_url) {
       appendArtifact("Agent report", result.agent_report, result.agent_report_url);
       $("reportLink").href = result.agent_report_url;
+      if (result.multiview_contact_sheet_url) {
+        appendArtifact("多视角 contact sheet", result.multiview_contact_sheet, result.multiview_contact_sheet_url);
+      }
     } else if (result.score_report) {
       appendArtifact("评分 report", result.score_report, `/api/file?path=${encodeURIComponent(result.score_report)}`);
       $("reportLink").href = `/api/file?path=${encodeURIComponent(result.score_report)}`;
@@ -531,7 +689,7 @@ async function loadConfig() {
   $("renderPrompt").value = defaults.prompt || $("renderPrompt").value;
   $("negativePrompt").value = defaults.negative_prompt || $("negativePrompt").value;
   $("shapeQuality").value = defaults.shape_quality || "balanced";
-  $("aiBackend").value = defaults.agent_render === false ? "sdxl" : "agent";
+  $("aiBackend").value = defaults.agent_render === false ? "flux2" : "agent";
   $("agentBudget").value = String(defaults.agent_max_generations || 10);
   $("aiSteps").value = String(defaults.ai_steps || 12);
   $("aiResolution").value = String(defaults.ai_resolution || 1024);
@@ -542,6 +700,8 @@ document.addEventListener("DOMContentLoaded", () => {
   initViewer();
   applyModeVisibility();
   $("sourceMode").addEventListener("change", applyModeVisibility);
+  $("autoRunButton").addEventListener("click", runAutoAgent);
+  $("autoSceneButton").addEventListener("click", runAutoScene);
   $("generate3dButton").addEventListener("click", generate3D);
   $("lockCameraButton").addEventListener("click", lockCamera);
   $("renderWhiteButton").addEventListener("click", renderWhite);
