@@ -92,7 +92,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "no_proxy": False,
         "use_tool_schema": True,
-        "fallback_to_rules": True,
+        "fallback_to_rules": False,
     },
     "auto_agent": {
         "default_source_mode": "procedural",

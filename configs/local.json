@@ -118,7 +118,6 @@
       ],
       "control_only": true,
       "geometry_lock": true,
-      "negative_prompt": "white clay, pale plastic, filled side slots, missing open holes, changed silhouette, extra horns, missing long beak, missing side handles, human face, eyes, text, logo, deformed geometry, smooth simplified helmet",
       "license_note": "Local SDXL Base plus Canny/Depth ControlNet, used for geometry-constrained image rendering."
     },
     "flux2_klein_4b": {
@@ -358,7 +357,7 @@
     "api_key_env": "DASHSCOPE_API_KEY",
     "no_proxy": false,
     "use_tool_schema": true,
-    "fallback_to_rules": true
+    "fallback_to_rules": false
   },
   "auto_agent": {
     "default_source_mode": "procedural",

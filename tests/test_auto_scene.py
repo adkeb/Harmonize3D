@@ -11,7 +11,6 @@ from local3dai.auto_scene import (
     AutoSceneOptions,
     ExternalImagegenRequired,
     SceneToolExecutor,
-    _module_negative_prompt_with_safety,
     _module_reference_prompt_with_safety,
     _pending_external_imagegen_summary,
     apply_module_review_revisions,
@@ -74,7 +73,7 @@ class AutoSceneTest(unittest.TestCase):
         concept = plan["concept_image_plan"]
         self.assertEqual(concept["output"], "concept/global_concept.png")
         self.assertIn("planning", concept["purpose"])
-        self.assertEqual(concept["negative_prompt"], "")
+        self.assertNotIn("negative_prompt", concept)
 
     def test_module_plan_contains_prompts_roles_sizes_and_placement(self) -> None:
         plan, _ = call_model_scene_planner({}, self._options())
@@ -114,8 +113,8 @@ class AutoSceneTest(unittest.TestCase):
         self.assertEqual(plan["auto_task"]["expanded_request"], "expanded by model")
         self.assertEqual(plan["scene_plan"]["scene_type"], "model_showroom")
         self.assertEqual(plan["concept_image_plan"]["concept_prompt"], "model generated concept prompt")
-        self.assertEqual(plan["concept_image_plan"]["negative_prompt"], "")
-        self.assertEqual(plan["prompt_plan"]["negative_prompt"], "")
+        self.assertNotIn("negative_prompt", plan["concept_image_plan"])
+        self.assertNotIn("negative_prompt", plan["prompt_plan"])
         call.assert_called_once()
 
     def test_dashscope_multimodal_call_uses_timeout_and_disables_thinking(self) -> None:
@@ -179,7 +178,6 @@ class AutoSceneTest(unittest.TestCase):
                         "reference_generation": {"dashscope_model": "wan-test", "dashscope_image_edit_model": "wan-test-edit"},
                     },
                     prompt="front elevation single object on pure solid background",
-                    negative_prompt="legacy negative prompt should be ignored",
                     output=output,
                     seed=1,
                     width=1024,
@@ -196,10 +194,10 @@ class AutoSceneTest(unittest.TestCase):
             content = message.get("content") if hasattr(message, "get") else message["content"]
             self.assertIn("front elevation single object", content[0]["text"])
             self.assertEqual(content[1]["image"].split("://", 1)[0], "file")
-            self.assertEqual(result["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", result)
             self.assertEqual(result["source_image"], str(concept.resolve()))
             metadata = read_manifest(output.with_suffix(".dashscope_imagegen.json"))
-            self.assertEqual(metadata["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", metadata)
             self.assertEqual(metadata["source_image"], str(concept.resolve()))
 
     def test_model_scene_planner_missing_fields_uses_generic_not_hardcoded_fallback(self) -> None:
@@ -264,7 +262,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(module["role"], "hero_object")
             self.assertIn("solid", module["reference_prompt"])
             self.assertIn("blank unlabeled surfaces", module["reference_prompt"])
-            self.assertEqual(module["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", module)
             self.assertIn("orthographic front view", module["reference_prompt"])
             sent_prompt = json.loads(call.call_args.kwargs["messages"][0]["content"][1]["text"])
             self.assertIn("Blender Z-up", sent_prompt["layout_coordinate_contract"]["coordinate_space"])
@@ -339,7 +337,6 @@ class AutoSceneTest(unittest.TestCase):
                             "module_id": "industrial_robotic_arm",
                             "name": "industrial robotic arm",
                             "reference_prompt": "sleek industrial robotic arm on white background",
-                            "negative_prompt": "text, logo",
                         }
                     ]
                 },
@@ -350,7 +347,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("orthographic front view", manifest["prompt"])
             self.assertIn("simplified six-axis sealed articulated robot arm", manifest["prompt"])
             self.assertNotIn("six-axis industrial robotic arm", manifest["prompt"])
-            self.assertEqual(manifest["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", manifest)
             duplicated_prompt = _module_reference_prompt_with_safety(
                 {
                     "module_id": "industrial_robotic_arm",
@@ -421,11 +418,6 @@ class AutoSceneTest(unittest.TestCase):
             )
             self.assertNotIn(", not,", revised_with_negative_views)
             self.assertNotRegex(revised_with_negative_views, r"(?:^|, )not(?:,|$)")
-            negative = _module_negative_prompt_with_safety(
-                {"module_id": "industrial_robotic_arm", "name": "industrial robotic arm"},
-                "text, water, water",
-            )
-            self.assertEqual(negative, "")
             self.assertNotIn("ABB", side_profile)
             self.assertNotIn("KUKA", side_profile)
 
@@ -441,12 +433,6 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("long low rectangular silhouette", platform_prompt)
             self.assertNotIn("matte black", platform_prompt.lower())
             self.assertNotIn("display platform", platform_prompt.lower())
-            platform_negative = _module_negative_prompt_with_safety(
-                {"module_id": "black_display_platform", "name": "matte black display platform", "role": "supporting_object"},
-                "text, logo",
-            )
-            self.assertEqual(platform_negative, "")
-
     def test_module_review_revision_rejects_mechanical_arm_water_prompt(self) -> None:
         module_plan = {
             "modules": [
@@ -454,7 +440,6 @@ class AutoSceneTest(unittest.TestCase):
                     "module_id": "industrial_robotic_arm",
                     "name": "industrial robotic arm",
                     "reference_prompt": "sleek metallic industrial robotic arm",
-                    "negative_prompt": "text, logo",
                 }
             ]
         }
@@ -641,7 +626,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(manifest["path"]).is_absolute())
             self.assertTrue(Path(manifest["prompt_file"]).is_absolute())
             self.assertEqual(call.call_args.kwargs["kind"], "concept")
-            self.assertEqual(call.call_args.kwargs["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", call.call_args.kwargs)
             self.assertNotIn("source_image", call.call_args.kwargs)
 
     def test_auto_scene_returns_pending_summary_for_external_concept_image(self) -> None:
@@ -944,7 +929,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(summary["global_concept"]).is_absolute())
             module_manifest = read_manifest(root / "modules" / "model_hero_object" / "reference_manifest.json")
             self.assertEqual(module_manifest["image_source"], "dashscope_imagegen")
-            self.assertEqual(module_manifest["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", module_manifest)
             self.assertEqual(Path(module_manifest["source_image"]), Path(summary["global_concept"]))
             self.assertEqual(module_manifest["review_status"], "pass")
             self.assertEqual(module_manifest["review_attempt"], 2)
@@ -1022,13 +1007,13 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(len(summary["references"]), 2)
             self.assertEqual(call.call_count, 2)
             for image_call in call.call_args_list:
-                self.assertEqual(image_call.kwargs["negative_prompt"], "")
+                self.assertNotIn("negative_prompt", image_call.kwargs)
                 self.assertEqual(image_call.kwargs["source_image"], None)
             self.assertGreaterEqual(max_active_calls, 2)
             manifest = read_manifest(root / "modules" / "main_vehicle" / "reference_manifest.json")
             self.assertEqual(manifest["created_by"], "dashscope_imagegen_reference_generation")
             self.assertEqual(manifest["image_source"], "dashscope_imagegen")
-            self.assertEqual(manifest["negative_prompt"], "")
+            self.assertNotIn("negative_prompt", manifest)
             self.assertTrue(Path(manifest["reference_image"]).is_absolute())
             self.assertTrue(Path(manifest["preprocessed_image"]).is_absolute())
             self.assertTrue(Path(manifest["prompt_file"]).is_absolute())

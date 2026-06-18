@@ -365,7 +365,6 @@ def _generic_model_plan_defaults(options: AutoSceneOptions) -> dict[str, dict[st
         },
         "concept_image_plan": {
             "concept_prompt": expanded,
-            "negative_prompt": "",
             "width": 1024,
             "height": 1024,
             "output": "concept/global_concept.png",
@@ -374,7 +373,6 @@ def _generic_model_plan_defaults(options: AutoSceneOptions) -> dict[str, dict[st
         "module_plan": {"modules": []},
         "prompt_plan": {
             "render_prompt": expanded,
-            "negative_prompt": "",
             "reference_policy": "model_render_channels_only",
             "forbidden_image_inputs": ["concept/global_concept.png", "modules/*/reference.png"],
         },
@@ -396,7 +394,6 @@ def _mock_model_module_plan(options: AutoSceneOptions) -> dict[str, Any]:
                 f"Primary subject implied by this user request: {prompt_prefix}. "
                 "Single isolated object, catalog reconstruction input."
             ),
-            "negative_prompt": "",
             "expected_real_world_size": {"width": 2.0, "depth": 2.0, "height": 1.2, "unit": "meters"},
             "placement": {
                 "anchor": "scene_center",
@@ -417,7 +414,6 @@ def _mock_model_module_plan(options: AutoSceneOptions) -> dict[str, Any]:
                 f"Minimal support surface or plinth suitable for the scene requested as: {prompt_prefix}. "
                 "Single isolated object, simple clean geometry."
             ),
-            "negative_prompt": "",
             "expected_real_world_size": {"width": 3.2, "depth": 2.4, "height": 0.25, "unit": "meters"},
             "placement": {
                 "anchor": "under_primary_subject",
@@ -438,7 +434,6 @@ def _mock_model_module_plan(options: AutoSceneOptions) -> dict[str, Any]:
                 f"Simple background element that supports the requested scene: {prompt_prefix}. "
                 "Single isolated object, clean silhouette."
             ),
-            "negative_prompt": "",
             "expected_real_world_size": {"width": 3.8, "depth": 0.18, "height": 2.2, "unit": "meters"},
             "placement": {
                 "anchor": "behind_primary_subject",
@@ -481,14 +476,13 @@ def _normalize_module(module: dict[str, Any], index: int) -> dict[str, Any]:
         "generate_reference_image": bool(module.get("generate_reference_image", True)),
         "generate_3d": bool(module.get("generate_3d", True)),
         "reference_prompt": prompt,
-        "negative_prompt": "",
         "expected_real_world_size": {"width": width, "depth": depth, "height": height, "unit": "meters"},
         "placement": placement,
         "constraints": list(module.get("constraints", [])) if isinstance(module.get("constraints", []), list) else [],
         "prompt_source": str(module.get("prompt_source") or "dashscope_multimodal_object_prompt"),
     }
     normalized["reference_prompt"] = _module_reference_prompt_with_safety(normalized, prompt)
-    normalized["negative_prompt"] = _module_negative_prompt_with_safety(normalized, "")
+    normalized.pop("negative_prompt", None)
     return normalized
 
 
@@ -510,10 +504,10 @@ def _normalize_model_plan(plan: dict[str, Any], options: AutoSceneOptions) -> di
         or prompt_plan.get("base_prompt")
         or options.request
     )
-    concept_image_plan["negative_prompt"] = ""
+    concept_image_plan.pop("negative_prompt", None)
     concept_image_plan.setdefault("purpose", "planning-only model-generated concept; audited before module prompt generation")
     prompt_plan["render_prompt"] = str(prompt_plan.get("render_prompt") or auto_task.get("expanded_request") or concept_image_plan["concept_prompt"])
-    prompt_plan["negative_prompt"] = ""
+    prompt_plan.pop("negative_prompt", None)
     prompt_plan["reference_policy"] = "model_render_channels_only"
     prompt_plan["forbidden_image_inputs"] = ["concept/global_concept.png", "modules/*/reference.png"]
     camera_views = camera_plan.get("views", [])
@@ -836,10 +830,6 @@ def _module_reference_prompt_with_safety(module: dict[str, Any], prompt: str) ->
     return _dedupe_comma_clauses(base)
 
 
-def _module_negative_prompt_with_safety(module: dict[str, Any], negative_prompt: str) -> str:
-    return ""
-
-
 def _module_reference_generation_prompt(module: dict[str, Any], prompt: str, *, has_concept_image: bool) -> str:
     module_name = str(module.get("name") or module.get("module_id") or "target module")
     module_role = str(module.get("role") or "")
@@ -931,7 +921,6 @@ def _generate_prompt_reference_image(
     *,
     config: dict[str, Any],
     prompt: str,
-    negative_prompt: str,
     output: Path,
     seed: int,
     width: int,
@@ -951,7 +940,6 @@ def _generate_prompt_reference_image(
         seed=seed,
         model_ref=model.get("local_path") or model.get("model_path") or model.get("model_id", ""),
         model_config=model,
-        negative_prompt="",
         device=config.get("ai", {}).get("device", "cuda:0"),
         dtype=model.get("dtype") or config.get("ai", {}).get("dtype", "bfloat16"),
         variant=model.get("variant") or config.get("ai", {}).get("variant"),
@@ -968,7 +956,6 @@ def _generate_prompt_reference_image(
         "model_key": selected_key,
         "backend": backend_name,
         "prompt": prompt,
-        "negative_prompt": "",
     }
 
 
@@ -1016,7 +1003,6 @@ def _generate_dashscope_reference_image(
     *,
     config: dict[str, Any],
     prompt: str,
-    negative_prompt: str,
     output: Path,
     seed: int,
     width: int,
@@ -1097,7 +1083,6 @@ def _generate_dashscope_reference_image(
             "kind": kind,
             "module_id": module_id,
             "prompt": prompt,
-            "negative_prompt": "",
             "source_image": _absolute_artifact_path(source_image_path) if source_image_path else "",
             "output_path": str(output.expanduser().resolve()),
             "size": size,
@@ -1113,7 +1098,6 @@ def _generate_dashscope_reference_image(
             "backend": "dashscope_image_generation",
             "model": model,
             "prompt": prompt,
-            "negative_prompt": "",
             "source_image": _absolute_artifact_path(source_image_path) if source_image_path else "",
             "metadata": _absolute_artifact_path(output.with_suffix(".dashscope_imagegen.json")),
         }
@@ -1134,7 +1118,6 @@ def _write_external_imagegen_request(
     *,
     output: Path,
     prompt: str,
-    negative_prompt: str,
     kind: str,
     module_id: str = "",
     source_image: Path | None = None,
@@ -1626,7 +1609,6 @@ def generate_concept_image(
     workdir = workdir.expanduser().resolve()
     output = workdir / str(concept_plan.get("output", "concept/global_concept.png"))
     prompt = str(concept_plan.get("concept_prompt") or concept_plan.get("prompt") or "")
-    negative_prompt = ""
     prompt_path = output.with_name("concept_prompt.txt")
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
@@ -1642,13 +1624,11 @@ def generate_concept_image(
                 "created_by": "mock_image2_generation",
                 "path": _absolute_artifact_path(output),
                 "prompt": prompt,
-                "negative_prompt": negative_prompt,
             }
         elif _uses_dashscope_imagegen(config):
             generation = _generate_dashscope_reference_image(
                 config=config,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 output=output,
                 seed=int(concept_plan.get("seed", options.seed if options else 0)),
                 width=int(concept_plan.get("width", config.get("reference_generation", {}).get("concept_width", 1472))),
@@ -1659,7 +1639,6 @@ def generate_concept_image(
             request_path = _write_external_imagegen_request(
                 output=output,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 kind="concept",
             )
             _raise_external_imagegen_required(request_path)
@@ -1667,7 +1646,6 @@ def generate_concept_image(
             generation = _generate_prompt_reference_image(
                 config=config,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 output=output,
                 seed=int(concept_plan.get("seed", options.seed if options else 0)),
                 width=int(concept_plan.get("width", 1024)),
@@ -1678,7 +1656,6 @@ def generate_concept_image(
             "created_by": "imagegen_skill_external" if provider in {"external_imagegen", "imagegen", "imagegen_skill", "manual_image2"} else "image2_provided",
             "path": _absolute_artifact_path(output),
             "prompt": prompt,
-            "negative_prompt": negative_prompt,
         }
     write_manifest(
         output.with_name("generation_manifest.json"),
@@ -1729,7 +1706,6 @@ def generate_module_references(
                 str(module.get("reference_prompt", "")),
                 has_concept_image=use_concept_source_image,
             )
-            negative_prompt = ""
             module_dir.mkdir(parents=True, exist_ok=True)
             prompt_path = module_dir / "reference_prompt.txt"
             prompt_path.write_text(prompt + "\n", encoding="utf-8")
@@ -1737,7 +1713,6 @@ def generate_module_references(
                 request_path = _write_external_imagegen_request(
                     output=reference,
                     prompt=prompt,
-                    negative_prompt=negative_prompt,
                     kind="module_reference",
                     module_id=module_id,
                     source_image=concept_source if use_concept_source_image else None,
@@ -1772,7 +1747,6 @@ def generate_module_references(
             str(module.get("reference_prompt", "")),
             has_concept_image=use_concept_source_image,
         )
-        negative_prompt = ""
         module_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = module_dir / "reference_prompt.txt"
         prompt_path.write_text(prompt + "\n", encoding="utf-8")
@@ -1788,7 +1762,6 @@ def generate_module_references(
                 "image_source": image_source,
                 "path": _absolute_artifact_path(reference),
                 "prompt": prompt,
-                "negative_prompt": negative_prompt,
                 "source_image": _absolute_artifact_path(concept_source) if use_concept_source_image and concept_source else "",
             }
         elif should_mock:
@@ -1798,14 +1771,12 @@ def generate_module_references(
                 "image_source": "mock_image2_generation",
                 "path": _absolute_artifact_path(reference),
                 "prompt": prompt,
-                "negative_prompt": negative_prompt,
                 "source_image": "",
             }
         elif _uses_external_imagegen(config):
             request_path = _write_external_imagegen_request(
                 output=reference,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 kind="module_reference",
                 module_id=module_id,
                 source_image=concept_source if use_concept_source_image else None,
@@ -1815,7 +1786,6 @@ def generate_module_references(
             generation = _generate_dashscope_reference_image(
                 config=config,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 output=reference,
                 seed=int((options.seed if options else 0) + index * 997),
                 width=int(module.get("reference_width", config.get("reference_generation", {}).get("width", 1280))),
@@ -1828,7 +1798,6 @@ def generate_module_references(
             generation = _generate_prompt_reference_image(
                 config=config,
                 prompt=prompt,
-                negative_prompt=negative_prompt,
                 output=reference,
                 seed=int((options.seed if options else 0) + index * 997),
                 width=int(module.get("reference_width", config.get("reference_generation", {}).get("width", 1024))),
@@ -1847,7 +1816,6 @@ def generate_module_references(
             "created_by": generation.get("created_by", ""),
             "prompt": prompt,
             "prompt_file": _absolute_artifact_path(prompt_path),
-            "negative_prompt": negative_prompt,
             "source_image": _absolute_artifact_path(concept_source) if use_concept_source_image and concept_source else "",
             "inherits_global_style": scene_plan.get("global_style", {}),
             "purpose": "module image-to-3D reference only; not used directly by final AI render",
@@ -1978,7 +1946,7 @@ def apply_module_review_revisions(module_plan: dict[str, Any], review: dict[str,
         if module_id in revisions:
             safe_revision = _safe_review_revision_prompt(module, revisions[module_id])
             module["reference_prompt"] = _module_reference_prompt_with_safety(module, safe_revision)
-            module["negative_prompt"] = ""
+            module.pop("negative_prompt", None)
             module["prompt_source"] = "dashscope_multimodal_review_revision"
     return failed
 
