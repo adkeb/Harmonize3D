@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from local3dai.auto_scene import (
     generate_module_assets,
     generate_module_references,
     import_codex_image2_result,
+    import_latest_codex_image2_results,
     module_failure_policy,
     module_presence_score,
     plan_scene_layout,
@@ -596,6 +598,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["provider"], "codex_builtin_image2")
             self.assertTrue(Path(request["request_path"]).is_absolute())
             self.assertIn("auto-scene-import-image2", request["import_command"])
+            self.assertIn("auto-scene-import-latest-image2", request["latest_import_command"])
             self.assertNotIn("negative_prompt", request)
             self.assertTrue(Path(request["output_path"]).is_absolute())
             handoff = Path(request["codex_image2_handoff"])
@@ -606,6 +609,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn(request["output_path"], handoff_text)
             self.assertIn(request["request_path"], handoff_text)
             self.assertIn("auto-scene-import-image2", handoff_text)
+            self.assertIn("auto-scene-import-latest-image2", handoff_text)
             self.assertNotIn("negative_prompt", handoff_text)
 
     def test_concept_generation_can_use_dashscope_imagegen_file_provider(self) -> None:
@@ -770,6 +774,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(batch["provider"], "codex_builtin_image2")
             self.assertTrue(Path(batch["request_path"]).is_absolute())
             self.assertIn("auto-scene-import-image2", batch["import_command"])
+            self.assertIn("auto-scene-import-latest-image2", batch["latest_import_command"])
             handoff = Path(batch["codex_image2_handoff"])
             self.assertTrue(handoff.exists())
             handoff_text = handoff.read_text(encoding="utf-8")
@@ -777,6 +782,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn(str(concept_output), handoff_text)
             self.assertIn(batch["requests"][0]["output_path"], handoff_text)
             self.assertIn("model_hero_object=/path/to/codex-image2-output-1.png", handoff_text)
+            self.assertIn("auto-scene-import-latest-image2", handoff_text)
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
 
             with (
@@ -980,12 +986,14 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["module_id"], "main_vehicle")
             self.assertEqual(request["provider"], "codex_builtin_image2")
             self.assertIn("auto-scene-import-image2", request["import_command"])
+            self.assertIn("auto-scene-import-latest-image2", request["latest_import_command"])
             self.assertNotIn("negative_prompt", request)
             self.assertTrue(Path(request["codex_image2_handoff"]).exists())
             batch = read_manifest(root / "modules" / "imagegen_batch_request.json")
             self.assertEqual(batch["kind"], "module_reference_batch")
             self.assertEqual(batch["request_count"], 1)
             self.assertIn("main_vehicle=/path/to/codex-image2-output-1.png", batch["import_command"])
+            self.assertIn("auto-scene-import-latest-image2", batch["latest_import_command"])
             self.assertTrue(Path(batch["codex_image2_handoff"]).exists())
 
     def test_import_codex_image2_single_request_copies_and_marks_fulfilled(self) -> None:
@@ -1057,6 +1065,80 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(all(item["status"] == "fulfilled_by_codex_image2" for item in batch["requests"]))
             self.assertEqual(batch["requests"][0]["fulfilled_output_path"], str(car_output.resolve()))
             self.assertEqual(batch["requests"][1]["fulfilled_output_path"], str(screen_output.resolve()))
+            self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
+
+    def test_import_latest_codex_image2_single_request_scans_generated_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / "codex_home"
+            generated = codex_home / "generated_images" / "thread"
+            generated.mkdir(parents=True)
+            marker = root / "before.marker"
+            marker.write_text("before\n", encoding="utf-8")
+            os.utime(marker, (1000, 1000))
+            generated_image = generated / "ig_concept.png"
+            Image.new("RGB", (32, 20), (80, 120, 210)).save(generated_image)
+            os.utime(generated_image, (1005, 1005))
+            output = root / "concept" / "global_concept.png"
+            request_path = write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {
+                    "type": "external_imagegen_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "concept",
+                    "output_path": str(output),
+                    "prompt": "concept prompt",
+                },
+            )
+
+            summary = import_latest_codex_image2_results(request_path, codex_home=codex_home, after_marker=marker)
+
+            self.assertEqual(summary["source"], "codex_generated_images_latest_scan")
+            self.assertEqual(summary["codex_generated_images"], [str(generated_image.resolve())])
+            self.assertTrue(output.exists())
+            request = read_manifest(request_path)
+            self.assertEqual(request["status"], "fulfilled_by_codex_image2")
+            self.assertEqual(request["imported_image"], str(generated_image.resolve()))
+            self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
+
+    def test_import_latest_codex_image2_batch_maps_request_order_to_mtime_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / "codex_home"
+            generated = codex_home / "generated_images" / "thread"
+            generated.mkdir(parents=True)
+            first_image = generated / "ig_first.png"
+            second_image = generated / "ig_second.png"
+            Image.new("RGB", (18, 18), (220, 220, 230)).save(first_image)
+            Image.new("RGB", (18, 18), (30, 70, 130)).save(second_image)
+            os.utime(first_image, (2001, 2001))
+            os.utime(second_image, (2002, 2002))
+            car_output = root / "modules" / "main_vehicle" / "reference.png"
+            screen_output = root / "modules" / "display_screen" / "reference.png"
+            batch_path = write_manifest(
+                root / "modules" / "imagegen_batch_request.json",
+                {
+                    "type": "external_imagegen_batch_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "module_reference_batch",
+                    "requests": [
+                        {"kind": "module_reference", "module_id": "main_vehicle", "output_path": str(car_output)},
+                        {"kind": "module_reference", "module_id": "display_screen", "output_path": str(screen_output)},
+                    ],
+                },
+            )
+
+            summary = import_latest_codex_image2_results(batch_path, codex_home=codex_home)
+
+            self.assertEqual(summary["codex_generated_images"], [str(first_image.resolve()), str(second_image.resolve())])
+            batch = read_manifest(batch_path)
+            self.assertEqual(batch["requests"][0]["imported_image"], str(first_image.resolve()))
+            self.assertEqual(batch["requests"][1]["imported_image"], str(second_image.resolve()))
+            self.assertTrue(car_output.exists())
+            self.assertTrue(screen_output.exists())
+            self.assertEqual(batch["status"], "fulfilled_by_codex_image2")
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
 
     def test_import_codex_image2_final_request_maps_view_images(self) -> None:
@@ -1214,6 +1296,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(request["request_path"]).is_absolute())
             self.assertTrue(Path(request["codex_image2_handoff"]).exists())
             self.assertIn("auto-scene-import-image2", request["import_command"])
+            self.assertIn("auto-scene-import-latest-image2", request["latest_import_command"])
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
             item = request["requests"][0]
             self.assertTrue(Path(item["output_path"]).is_absolute())
@@ -1227,6 +1310,7 @@ class AutoSceneTest(unittest.TestCase):
             handoff_text = Path(request["codex_image2_handoff"]).read_text(encoding="utf-8")
             self.assertIn("white_model_rgb_position_lock", handoff_text)
             self.assertIn("view_hero=/path/to/codex-image2-output-1.png", handoff_text)
+            self.assertIn("auto-scene-import-latest-image2", handoff_text)
 
     def test_blender_render_backend_writes_auto_scene_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

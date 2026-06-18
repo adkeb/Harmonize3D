@@ -1134,6 +1134,10 @@ def _write_codex_image2_handoff(
             key = str(item.get("module_id") or item.get("view_id") or item.get("kind") or f"item_{index}")
             import_lines.append(f"  --image {key}=/path/to/codex-image2-output-{index}.png \\")
         import_lines[-1] = import_lines[-1].rstrip(" \\")
+    latest_import_lines = [
+        "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 \\",
+        f"  --request {request_path or '<request-json-path>'}",
+    ]
     lines = [
         "# Codex image2 Handoff",
         "",
@@ -1161,6 +1165,12 @@ def _write_codex_image2_handoff(
             "",
             "```bash",
             *import_lines,
+            "```",
+            "",
+            "If Codex saved the generated file(s) under `$CODEX_HOME/generated_images`, this can import the latest valid image file(s) automatically:",
+            "",
+            "```bash",
+            *latest_import_lines,
             "```",
             "",
         ]
@@ -1225,10 +1235,14 @@ def _write_external_imagegen_request(
             "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
             f"--request {request_path.expanduser().resolve()} --image /path/to/codex-image2-output.png"
         ),
+        "latest_import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
+            f"--request {request_path.expanduser().resolve()}"
+        ),
         "instructions": [
             "Generate this image with the Codex imagegen/image2 skill, not a local model.",
             "Use source_image as visual context when it is provided; generate a new isolated standalone module image matching the prompt.",
-            "Import the selected generated image with import_command, or copy it exactly to output_path.",
+            "Import the selected generated image with import_command, latest_import_command, or copy it exactly to output_path.",
             "Then rerun this stage so the image can be returned to the multimodal agent for review.",
         ],
     }
@@ -1740,6 +1754,13 @@ def _copy_codex_image2_result(source: Path, output_path: str) -> dict[str, str]:
     return {"source_image": str(source), "output_path": str(output)}
 
 
+def _codex_image2_request_items(request: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = request.get("requests")
+    if isinstance(raw_items, list) and raw_items:
+        return [item for item in raw_items if isinstance(item, dict)]
+    return [request]
+
+
 def import_codex_image2_result(
     request_path: Path,
     *,
@@ -1753,12 +1774,7 @@ def import_codex_image2_result(
     if image_path is None and not mappings:
         raise ValueError("Provide an image path for a single request or keyed mappings for a batch request.")
 
-    raw_items = request.get("requests")
-    items: list[dict[str, Any]]
-    if isinstance(raw_items, list) and raw_items:
-        items = [item for item in raw_items if isinstance(item, dict)]
-    else:
-        items = [request]
+    items = _codex_image2_request_items(request)
     if not items:
         raise ValueError(f"No Codex image2 request items found in: {request_path}")
     allow_single_image = len(items) == 1 and image_path is not None
@@ -1807,6 +1823,97 @@ def import_codex_image2_result(
         "imports": imports,
     }
     write_manifest(import_manifest_path, summary)
+    return summary
+
+
+def _codex_image2_generated_roots(codex_home: Path | None = None) -> list[Path]:
+    if codex_home is not None:
+        raw_candidates = [codex_home]
+    else:
+        raw_candidates = [
+            Path(os.environ["CODEX_HOME"]) if os.environ.get("CODEX_HOME") else None,
+            Path.home() / ".codex",
+        ]
+    roots: list[Path] = []
+    for candidate in raw_candidates:
+        if not candidate:
+            continue
+        generated = Path(candidate).expanduser() / "generated_images"
+        if generated.exists() and generated not in roots:
+            roots.append(generated)
+    return roots
+
+
+def find_latest_codex_image2_outputs(
+    *,
+    count: int,
+    codex_home: Path | None = None,
+    after_timestamp: float | None = None,
+    newest_first: bool = False,
+) -> list[Path]:
+    suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    candidates: list[Path] = []
+    for root in _codex_image2_generated_roots(codex_home):
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in suffixes:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if after_timestamp is not None and stat.st_mtime <= after_timestamp:
+                continue
+            if _valid_image(path):
+                candidates.append(path)
+    candidates = sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+    selected = candidates[: max(1, int(count))]
+    if len(selected) < max(1, int(count)):
+        roots = ", ".join(str(root) for root in _codex_image2_generated_roots(codex_home)) or "<none>"
+        raise FileNotFoundError(f"Found {len(selected)} Codex image2 output(s), expected {count}. Searched: {roots}")
+    if not newest_first:
+        selected = list(reversed(selected))
+    return [path.expanduser().resolve() for path in selected]
+
+
+def import_latest_codex_image2_results(
+    request_path: Path,
+    *,
+    codex_home: Path | None = None,
+    after_timestamp: float | None = None,
+    after_marker: Path | None = None,
+    newest_first: bool = False,
+) -> dict[str, Any]:
+    request_path = Path(request_path).expanduser().resolve()
+    request = read_manifest(request_path)
+    items = _codex_image2_request_items(request)
+    if not items:
+        raise ValueError(f"No Codex image2 request items found in: {request_path}")
+    marker_time = None
+    if after_marker is not None:
+        marker_time = Path(after_marker).expanduser().stat().st_mtime
+    after = after_timestamp if after_timestamp is not None else marker_time
+    outputs = find_latest_codex_image2_outputs(
+        count=len(items),
+        codex_home=codex_home,
+        after_timestamp=after,
+        newest_first=newest_first,
+    )
+    if len(items) == 1:
+        summary = import_codex_image2_result(request_path, image_path=outputs[0])
+    else:
+        mappings: dict[str, Path] = {}
+        for item, output in zip(items, outputs):
+            keys = _codex_image2_request_keys(item)
+            if not keys:
+                raise ValueError(f"Cannot map latest Codex image2 output to request item without module_id/view_id/output_path: {item}")
+            mappings[keys[0]] = output
+        summary = import_codex_image2_result(request_path, image_mappings=mappings)
+    summary["source"] = "codex_generated_images_latest_scan"
+    summary["codex_generated_images"] = [str(path) for path in outputs]
+    summary["mapping_policy"] = "request_order_to_file_mtime_order"
+    summary["newest_first"] = bool(newest_first)
+    summary["after_timestamp"] = after
+    write_manifest(Path(summary["request_path"]).with_name("codex_image2_import.json"), summary)
     return summary
 
 
@@ -1953,6 +2060,10 @@ def generate_module_references(
                     "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
                     f"--request {batch_path.expanduser().resolve()} "
                     + " ".join(import_parts)
+                ),
+                "latest_import_command": (
+                    "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
+                    f"--request {batch_path.expanduser().resolve()}"
                 ),
             }
             _write_codex_image2_handoff(
@@ -3790,10 +3901,14 @@ def _write_codex_image2_final_request(
             f"--request {request_path.expanduser().resolve()} "
             + " ".join(import_parts)
         ),
+        "latest_import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
+            f"--request {request_path.expanduser().resolve()}"
+        ),
         "instruction": (
             "Use Codex built-in image2, not DashScope/Qwen image2 and not a local AI renderer. "
             "For each request, provide the listed input images to image2; the white-model RGB is the position lock and the concept image is style-only. "
-            "Save each selected output exactly to output_path or import it with import_command, then rerun the Auto Scene command."
+            "Save each selected output exactly to output_path or import it with import_command/latest_import_command, then rerun the Auto Scene command."
         ),
     }
     _write_codex_image2_handoff(

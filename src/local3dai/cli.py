@@ -9,7 +9,7 @@ from typing import Any
 
 from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
-from .auto_scene import AutoSceneOptions, import_codex_image2_result, run_auto_scene
+from .auto_scene import AutoSceneOptions, import_codex_image2_result, import_latest_codex_image2_results, run_auto_scene
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
@@ -322,6 +322,18 @@ def cmd_auto_scene_import_image2(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_scene_import_latest_image2(args: argparse.Namespace) -> int:
+    summary = import_latest_codex_image2_results(
+        Path(args.request),
+        codex_home=Path(args.codex_home) if args.codex_home else None,
+        after_timestamp=args.after_timestamp,
+        after_marker=Path(args.after_marker) if args.after_marker else None,
+        newest_first=bool(args.newest_first),
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = _load(args.config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -561,6 +573,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Image path for a single request, or key=/path for a batch. Keys can be module_id, view_id, kind, or output_path.",
     )
     image2_import.set_defaults(func=cmd_auto_scene_import_image2)
+
+    latest_image2_import = subparsers.add_parser("auto-scene-import-latest-image2", help="Import the latest Codex image2 generated files into an Auto Scene pending request")
+    latest_image2_import.add_argument("--request", required=True, help="Path to imagegen_request.json, imagegen_batch_request.json, or codex_image2_final_request.json")
+    latest_image2_import.add_argument("--codex-home", help="Override CODEX_HOME when scanning generated_images")
+    latest_image2_import.add_argument("--after-marker", help="Only import generated files newer than this marker file")
+    latest_image2_import.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
+    latest_image2_import.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
+    latest_image2_import.set_defaults(func=cmd_auto_scene_import_latest_image2)
 
     auto_doctor = subparsers.add_parser("auto-doctor", help="Check Auto Agent Qwen planner runtime wiring")
     auto_doctor.add_argument("--config", default="configs/local.json")

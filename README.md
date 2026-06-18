@@ -178,6 +178,13 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \
 
 For module or final-render batches, pass keyed images such as `--image main_vehicle=/path/to/car.png` or `--image view_hero=/path/to/final.png`, then rerun the same `auto-scene` command. The handoff and import path do not use negative prompts.
 
+If Codex saved the built-in image2 output under `$CODEX_HOME/generated_images`, the latest valid generated image file(s) can be imported without manually copying paths:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
+```
+
 Typical output layout:
 
 ```text
