@@ -195,6 +195,8 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
 
 Use `--dry-plan` to print the retry request and handoff without changing files, or `--import-only` when you only want to copy the latest Codex image2 outputs into the retry request before a manual rerun.
 
+If an older/local run produced a final image without `final/codex_image2_final_request.json`, the retry planner now synthesizes that missing request from `reports/white_model_position_contract.json` and `renders/render_manifest.json`, keeping only white-model render channels as final image2 inputs.
+
 Real non-mock runs also package `reports/image2_flow_audit.json`. To rerun the same audit manually after a run advances past module generation:
 
 ```bash

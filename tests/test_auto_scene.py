@@ -1714,6 +1714,64 @@ class AutoSceneTest(unittest.TestCase):
             self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
             self.assertTrue(Path(retry["codex_image2_handoff"]).exists())
 
+    def test_final_position_retry_plan_synthesizes_request_when_final_image2_request_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask", "depth", "normal"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (36, 38, 42))
+                ImageDraw.Draw(image).rectangle((26, 42, 108, 92), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            self.assertEqual(contract["status"], "pass")
+            final_image = root / "final" / "final_view_hero.png"
+            final_image.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (128, 128), (80, 80, 80)).save(final_image)
+            white_lock_report = {
+                "type": "white_model_position_lock",
+                "status": "needs_review",
+                "final_image": str(final_image),
+                "metrics": {"center_alignment": 0.1, "scale_alignment": 0.3},
+                "failure_reasons": ["center_alignment", "scale_alignment"],
+            }
+
+            retry = create_final_position_retry_plan(
+                workdir=root,
+                final_request_path=root / "final" / "codex_image2_final_request.json",
+                white_lock_report=white_lock_report,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+                output_report=root / "reports" / "final_position_retry_plan.json",
+            )
+
+            self.assertEqual(retry["status"], "awaiting_codex_image2_retry")
+            self.assertEqual(retry["reason"], "white_model_position_lock_needs_review")
+            synthesized = read_manifest(root / "final" / "codex_image2_final_request.json")
+            self.assertEqual(synthesized["status"], "synthesized_for_position_retry")
+            self.assertEqual(synthesized["provider"], "codex_builtin_image2")
+            self.assertEqual(synthesized["planning_images_excluded_from_final_inputs"], [])
+            retry_request = read_manifest(retry["retry_request"])
+            item = retry_request["requests"][0]
+            self.assertEqual(item["kind"], "final_render_position_retry")
+            roles = {entry["role"] for entry in item["input_images"]}
+            self.assertIn("white_model_rgb_position_lock", roles)
+            self.assertIn("edge_silhouette_lock", roles)
+            self.assertIn("mask_composition_reference", roles)
+            self.assertEqual(item["previous_final_image"], str(final_image))
+            self.assertIn("center_alignment", item["prompt"])
+            self.assertNotIn("negative_prompt", json.dumps(synthesized, ensure_ascii=False))
+            self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
+            self.assertTrue(Path(retry["codex_image2_handoff"]).exists())
+
     def test_auto_scene_workflow_mock_writes_required_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

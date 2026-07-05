@@ -4679,6 +4679,107 @@ def create_white_model_position_contract(
     return report
 
 
+def _synthesize_final_image2_request_from_position_contract(
+    *,
+    workdir: Path,
+    final_request_path: str | Path,
+    white_lock_report: dict[str, Any],
+    position_contract_path: str | Path,
+) -> Path | None:
+    contract_report = _read_manifest_or_empty(Path(position_contract_path))
+    render_manifest = str(contract_report.get("render_manifest") or "")
+    if not render_manifest or not Path(render_manifest).exists():
+        return None
+
+    requested_views = max(1, int(contract_report.get("contract_count") or 1))
+    render_views = _render_view_requests(render_manifest, max_views=min(3, requested_views))
+    views_by_id = {str(view.get("view_id") or ""): view for view in render_views if isinstance(view, dict)}
+    final_dir = Path(workdir) / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    request_path = Path(final_request_path) if final_request_path else final_dir / "codex_image2_final_request.json"
+    handoff_path = final_dir / "codex_image2_final_handoff.md"
+    requests: list[dict[str, Any]] = []
+
+    contracts = [item for item in contract_report.get("contracts", []) if isinstance(item, dict)]
+    if not contracts and render_views:
+        contracts = [_position_contract_for_render_view(render_views[0])]
+    for index, contract in enumerate(contracts, start=1):
+        view_id = str(contract.get("view_id") or f"view_{index}")
+        if view_id not in {"view_hero", "view_locked"} and index > 1:
+            continue
+        view = views_by_id.get(view_id) or (render_views[0] if render_views else {})
+        input_images = _final_image_reference_inputs(view)
+        if not input_images:
+            continue
+        output_path = str(white_lock_report.get("final_image") or final_dir / _final_output_filename(view_id))
+        prompt = _codex_image2_final_prompt(
+            "Render a polished production image from the assembled 3D white-model scene while preserving the white-model layout exactly.",
+            view_id=view_id,
+        )
+        contract_clause = _position_contract_prompt_clause(contract)
+        if contract_clause:
+            prompt = f"{prompt}\n\n{contract_clause}"
+        requests.append(
+            {
+                "view_id": view_id,
+                "source_render_view_id": str(view.get("view_id") or view_id),
+                "kind": "final_render",
+                "provider": "codex_builtin_image2",
+                "output_path": _absolute_artifact_path(output_path),
+                "prompt": prompt,
+                "input_images": input_images,
+                "position_lock_contract": contract,
+                "position_lock": {
+                    "primary_reference_role": "white_model_rgb_position_lock",
+                    "policy": "synthesized_from_white_model_position_contract_for_retry",
+                    "contract_source": _absolute_artifact_path(position_contract_path),
+                },
+                "style_policy": {
+                    "style_source": "generic_final_render_prompt",
+                    "planning_images_excluded_from_final_inputs": [],
+                },
+            }
+        )
+    if not requests:
+        return None
+
+    import_parts = []
+    for index, item in enumerate(requests, start=1):
+        key = str(item.get("view_id") or f"view_{index}")
+        import_parts.append(f"--image {key}=/path/to/codex-image2-final-{index}.png")
+    request = {
+        "type": "codex_image2_final_render_request",
+        "kind": "final_render_batch",
+        "status": "synthesized_for_position_retry",
+        "provider": "codex_builtin_image2",
+        "request_path": str(request_path.expanduser().resolve()),
+        "codex_image2_handoff": str(handoff_path.expanduser().resolve()),
+        "reference_policy": "white_model_position_locked_render_channels_only",
+        "render_manifest": _absolute_artifact_path(render_manifest),
+        "white_model_position_contract": _absolute_artifact_path(position_contract_path),
+        "planning_images_excluded_from_final_inputs": [],
+        "request_count": len(requests),
+        "requests": requests,
+        "output_paths": [item["output_path"] for item in requests],
+        "import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
+            f"--request {request_path.expanduser().resolve()} "
+            + " ".join(import_parts)
+        ),
+        "latest_import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
+            f"--request {request_path.expanduser().resolve()}"
+        ),
+        "instruction": (
+            "This request was synthesized from the white-model render channels because the original final Codex image2 request was missing. "
+            "Use Codex built-in image2 with only the listed render-channel inputs, then import the selected output and rerun Auto Scene."
+        ),
+    }
+    _write_codex_image2_handoff(handoff_path=handoff_path, request=request, batch_requests=requests)
+    write_manifest(request_path, request)
+    return request_path
+
+
 def _position_contract_by_view(position_contract_path: str | Path | None) -> dict[str, dict[str, Any]]:
     if not position_contract_path or not Path(position_contract_path).exists():
         return {}
@@ -5572,6 +5673,13 @@ def create_final_position_retry_plan(
         }
         write_manifest(report_path, report)
         return report
+    if not request_path:
+        request_path = _synthesize_final_image2_request_from_position_contract(
+            workdir=Path(workdir),
+            final_request_path=final_request_path,
+            white_lock_report=white_lock_report,
+            position_contract_path=position_contract_path,
+        )
     if not request_path:
         report = {
             "type": "final_position_retry_plan",
