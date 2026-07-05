@@ -24,7 +24,7 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The concept/final comparison still fails `white_hero_presence`; the final image's central white subject ratio is about `0.000431`, far below the concept target. Camera search now records and scores against a concept-derived composition target, module mesh sanity checks semantic slab/panel geometry, and final image2 requests carry a normalized white-model position contract with an automatic retry handoff when the final image drifts from the contract. The next engineering target is running the corrected Codex image2 retry loop on real final assets and replacing the stale `needs_review` result imagery.
+Current status is intentionally recorded as `needs_review`, not `pass`, because the full three-view scene has not been re-rendered end to end after the retry pass. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 hero retry now preserves the white-model hero position: `white_model_position_lock` passes with total `0.708514`, the concept/final comparison passes, and `final_position_retry_plan` reports `not_needed` for the hero view. The remaining engineering target is applying the same corrected loop to the side views and rerunning the complete multi-view Auto Scene package.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
@@ -184,6 +184,13 @@ If Codex saved the built-in image2 output under `$CODEX_HOME/generated_images`, 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 \
   --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
+```
+
+For older runs that already have `renders/render_manifest.json` and `final/final_view_hero.png` but do not yet have the position retry artifacts, backfill the white-model position reports and retry handoff first:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-plan-position-retry \
+  --workdir outputs/auto_scene/demo_showroom
 ```
 
 When `reports/final_position_retry_plan.json` reports `awaiting_codex_image2_retry`, the corrected final-render loop can be resumed from the workdir. The command reads the retry request, imports the latest Codex image2 result, then reruns the same Auto Scene workdir with the original task options from `auto_task.json`/`auto_scene_summary.json`:

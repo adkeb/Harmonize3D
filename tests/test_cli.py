@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local3dai.cli import build_parser
-from local3dai.manifest import write_manifest
+from local3dai.manifest import read_manifest, write_manifest
+from PIL import Image, ImageDraw
 
 
 class AutoSceneCliTest(unittest.TestCase):
@@ -129,6 +130,54 @@ class AutoSceneCliTest(unittest.TestCase):
             self.assertEqual(result["import"]["import_count"], 1)
             import_latest.assert_called_once()
             run_scene.assert_not_called()
+
+    def test_auto_scene_plan_position_retry_backfills_existing_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask", "depth", "normal"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(image).rectangle((24, 42, 106, 92), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            final_image = root / "final" / "final_view_hero.png"
+            final_image.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (128, 128), (70, 70, 70)).save(final_image)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "type": "auto_scene_summary",
+                    "status": "needs_review",
+                    "workdir": str(root),
+                    "render_manifest": str(render_manifest),
+                    "final_image": str(final_image),
+                    "final_view_images": {"view_hero": str(final_image)},
+                    "capabilities": {},
+                },
+            )
+
+            code, result = self._run_cli(["auto-scene-plan-position-retry", "--workdir", str(root)])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(result["retry_plan_status"], "awaiting_codex_image2_retry")
+            self.assertTrue(Path(result["white_model_position_contract"]).exists())
+            self.assertTrue(Path(result["white_model_position_lock"]).exists())
+            self.assertTrue(Path(result["final_position_retry_plan"]).exists())
+            final_request = read_manifest(root / "final" / "codex_image2_final_request.json")
+            self.assertEqual(final_request["status"], "synthesized_for_position_retry")
+            self.assertEqual(final_request["provider"], "codex_builtin_image2")
+            retry_request = read_manifest(result["retry_request"])
+            self.assertEqual(retry_request["status"], "awaiting_codex_image2")
+            roles = {entry["role"] for entry in retry_request["requests"][0]["input_images"]}
+            self.assertIn("white_model_rgb_position_lock", roles)
+            self.assertIn("edge_silhouette_lock", roles)
+            self.assertNotIn("negative_prompt", str(final_request))
+            summary = read_manifest(root / "auto_scene_summary.json")
+            self.assertEqual(summary["capabilities"]["final_position_retry_plan"]["status"], "awaiting_codex_image2_retry")
 
 
 if __name__ == "__main__":

@@ -9,11 +9,20 @@ from typing import Any
 
 from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
-from .auto_scene import AutoSceneOptions, audit_auto_scene_image2_flow, import_codex_image2_result, import_latest_codex_image2_results, run_auto_scene
+from .auto_scene import (
+    AutoSceneOptions,
+    audit_auto_scene_image2_flow,
+    create_final_position_retry_plan,
+    create_white_model_position_contract,
+    create_white_model_position_lock_report,
+    import_codex_image2_result,
+    import_latest_codex_image2_results,
+    run_auto_scene,
+)
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
-from .manifest import read_manifest
+from .manifest import read_manifest, write_manifest
 from .modelgen import generate_3d_model
 from .rendering.blender import render_model_with_blender
 from .sample import create_sample_renders
@@ -374,6 +383,121 @@ def _retry_request_from_plan(workdir: Path, plan: dict[str, Any]) -> Path:
     return request_path
 
 
+def _read_manifest_if_exists(path: Path) -> dict[str, Any]:
+    return read_manifest(path) if path.exists() else {}
+
+
+def _resolve_workdir_artifact(workdir: Path, raw: Any, fallback: Path) -> Path:
+    path = Path(str(raw or fallback)).expanduser()
+    if not path.is_absolute():
+        path = workdir / path
+    return path
+
+
+def _infer_auto_scene_views(summary: dict[str, Any], auto_task: dict[str, Any], args: argparse.Namespace) -> int:
+    if args.views:
+        return int(args.views)
+    if auto_task.get("output_views"):
+        return int(auto_task["output_views"])
+    final_view_images = summary.get("final_view_images", {})
+    if isinstance(final_view_images, dict) and final_view_images:
+        return len(final_view_images)
+    return 3
+
+
+def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir).expanduser().resolve()
+    summary_path = workdir / "auto_scene_summary.json"
+    summary = _read_manifest_if_exists(summary_path)
+    auto_task_path = _resolve_workdir_artifact(workdir, summary.get("auto_task"), workdir / "auto_task.json")
+    auto_task = _read_manifest_if_exists(auto_task_path)
+    render_manifest = _resolve_workdir_artifact(workdir, args.render_manifest or summary.get("render_manifest"), workdir / "renders" / "render_manifest.json")
+    final_image = _resolve_workdir_artifact(workdir, args.final_image or summary.get("final_image"), workdir / "final" / "final_view_hero.png")
+    if not render_manifest.exists():
+        raise FileNotFoundError(f"Missing Auto Scene render manifest: {render_manifest}")
+    if not final_image.exists():
+        raise FileNotFoundError(f"Missing Auto Scene final image: {final_image}")
+
+    reports_dir = workdir / "reports"
+    final_dir = workdir / "final"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    output_views = _infer_auto_scene_views(summary, auto_task, args)
+    position_contract_path = _resolve_workdir_artifact(
+        workdir,
+        args.position_contract or summary.get("white_model_position_contract"),
+        reports_dir / "white_model_position_contract.json",
+    )
+    position_lock_path = _resolve_workdir_artifact(
+        workdir,
+        args.position_lock_report or summary.get("white_model_position_lock"),
+        reports_dir / "white_model_position_lock.json",
+    )
+    retry_plan_path = reports_dir / "final_position_retry_plan.json"
+    final_request_path = final_dir / "codex_image2_final_request.json"
+
+    position_contract = create_white_model_position_contract(
+        render_manifest=render_manifest,
+        output_report=position_contract_path,
+        output_image=final_dir / "white_position_contract_overlay.png",
+        output_views=output_views,
+    )
+    position_lock = create_white_model_position_lock_report(
+        final_image=final_image,
+        render_manifest=render_manifest,
+        output_report=position_lock_path,
+        output_image=final_dir / "white_position_lock_overlay.png",
+    )
+    retry_plan = create_final_position_retry_plan(
+        workdir=workdir,
+        final_request_path=final_request_path,
+        white_lock_report=position_lock,
+        position_contract_path=position_contract_path,
+        output_report=retry_plan_path,
+    )
+
+    if summary and not args.no_summary_update:
+        summary["white_model_position_contract"] = str(position_contract_path)
+        summary["white_position_contract_overlay"] = str(final_dir / "white_position_contract_overlay.png")
+        summary["white_model_position_lock"] = str(position_lock_path)
+        summary["white_position_lock_overlay"] = str(final_dir / "white_position_lock_overlay.png")
+        summary["final_position_retry_plan"] = str(retry_plan_path)
+        capabilities = summary.setdefault("capabilities", {})
+        if isinstance(capabilities, dict):
+            capabilities["white_model_position_contract"] = {
+                "enabled": True,
+                "status": position_contract.get("status", ""),
+                "contract_count": position_contract.get("contract_count", 0),
+            }
+            capabilities["white_model_position_lock"] = {
+                "enabled": True,
+                "status": position_lock.get("status", ""),
+                "total": position_lock.get("metrics", {}).get("total", 0.0),
+            }
+            capabilities["final_position_retry_plan"] = {
+                "enabled": True,
+                "status": retry_plan.get("status", ""),
+            }
+        write_manifest(summary_path, summary)
+
+    result = {
+        "status": "planned",
+        "workdir": str(workdir),
+        "render_manifest": str(render_manifest),
+        "final_image": str(final_image),
+        "white_model_position_contract": str(position_contract_path),
+        "white_model_position_contract_status": position_contract.get("status", ""),
+        "white_model_position_lock": str(position_lock_path),
+        "white_model_position_lock_status": position_lock.get("status", ""),
+        "final_position_retry_plan": str(retry_plan_path),
+        "retry_plan_status": retry_plan.get("status", ""),
+        "retry_request": retry_plan.get("retry_request", ""),
+        "codex_image2_handoff": retry_plan.get("codex_image2_handoff", ""),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if retry_plan.get("status") in {"awaiting_codex_image2_retry", "not_needed"} or args.allow_not_applicable else 2
+
+
 def cmd_auto_scene_run_position_retry(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir).expanduser().resolve()
     plan_path = workdir / "reports" / "final_position_retry_plan.json"
@@ -686,6 +810,20 @@ def build_parser() -> argparse.ArgumentParser:
     latest_image2_import.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
     latest_image2_import.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
     latest_image2_import.set_defaults(func=cmd_auto_scene_import_latest_image2)
+
+    position_retry_plan = subparsers.add_parser(
+        "auto-scene-plan-position-retry",
+        help="Backfill white-model position reports and a Codex image2 retry plan for an existing Auto Scene workdir",
+    )
+    position_retry_plan.add_argument("--workdir", required=True, help="Existing Auto Scene workdir with renders/render_manifest.json and final/final_view_hero.png")
+    position_retry_plan.add_argument("--render-manifest", help="Override render_manifest path")
+    position_retry_plan.add_argument("--final-image", help="Override final image path")
+    position_retry_plan.add_argument("--position-contract", help="Override output/read path for reports/white_model_position_contract.json")
+    position_retry_plan.add_argument("--position-lock-report", help="Override output path for reports/white_model_position_lock.json")
+    position_retry_plan.add_argument("--views", type=int, help="Number of render views to include in the white-model position contract")
+    position_retry_plan.add_argument("--no-summary-update", action="store_true", help="Do not write generated artifact paths back into auto_scene_summary.json")
+    position_retry_plan.add_argument("--allow-not-applicable", action="store_true", help="Return exit code 0 even if a retry plan cannot be created")
+    position_retry_plan.set_defaults(func=cmd_auto_scene_plan_position_retry)
 
     position_retry = subparsers.add_parser(
         "auto-scene-run-position-retry",
