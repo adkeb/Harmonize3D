@@ -7,6 +7,7 @@ The current direction is MeshLock-MV: a lightweight mesh-guided Agent for struct
 ## Paper And Latest Results
 
 Latest paper artifact and source of truth: [`reports/论文.docx`](reports/%E8%AE%BA%E6%96%87.docx).
+Rendered PDF generated from the same DOCX: [`reports/论文.pdf`](reports/%E8%AE%BA%E6%96%87.pdf).
 
 Paper title: **Harmonize3D：面向 3D 结构约束与多视图一致性的本地 AI 渲染 Agent**  
 Subtitle: **从单对象闭环到模块化全场景生成流程的阶段性研究**  
@@ -23,7 +24,7 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The concept/final comparison still fails `white_hero_presence`; the final image's central white subject ratio is about `0.000431`, far below the concept target. The next engineering targets are flatter-screen mesh sanity checks, concept-aligned camera search, and stricter final-render adherence to the Blender white-model position.
+Current status is intentionally recorded as `needs_review`, not `pass`. The latest run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The concept/final comparison still fails `white_hero_presence`; the final image's central white subject ratio is about `0.000431`, far below the concept target. Camera search now records and scores against a concept-derived composition target, module mesh sanity checks semantic slab/panel geometry, and final image2 requests carry a normalized white-model position contract with an automatic retry handoff when the final image drifts from the contract. The next engineering target is running the corrected Codex image2 retry loop on real final assets and replacing the stale `needs_review` result imagery.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
@@ -119,7 +120,7 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor --allow-not-ready
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor --check-hf-mirror --allow-not-ready
 ```
 
-The agent exposes controlled tool execution through a fixed local tool list and records every call in `reports/tool_calls.json`. Visual judgement is a required packaging gate; it checks final pixels, comparison/contact-sheet images, structure scores, and multi-view consistency before declaring `complete`, `needs_review`, or `failed`.
+The agent exposes controlled tool execution through a fixed local tool list and records every call in `reports/tool_calls.json`. Visual judgement is a required packaging gate; it checks final pixels, comparison/contact-sheet images, white-model position lock, structure scores, multi-view consistency, and concept-aligned camera search evidence before declaring `complete`, `needs_review`, or `failed`.
 
 ## Auto Scene Mode
 
@@ -185,7 +186,7 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2
   --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
 ```
 
-After a run advances past module generation, audit whether it actually followed the required model-planned Codex image2 flow:
+Real non-mock runs also package `reports/image2_flow_audit.json`. To rerun the same audit manually after a run advances past module generation:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-audit-image2-flow \
@@ -204,16 +205,31 @@ outputs/auto_scene/<task>/
   modules/module_asset_manifest.json
   modules/<module_id>/reference.png
   modules/<module_id>/model.glb
+  modules/<module_id>/sanity.json
+  reports/module_mesh_sanity.json
+  reports/module_assets_index.json
+  final/module_references_contact_sheet.png
   scene/scene_assembly.json
   scene/final_scene.glb
   scene/scene_preview.png
+  scene/assembly_report.json
   cameras/camera_plan.json
   renders/render_manifest.json
+  reports/white_model_position_contract.json
+  final/white_position_contract_overlay.png
   final/final_view_hero.png
+  final/white_channels_contact_sheet.png
   final/final_view_left_30.png
   final/final_view_right_30.png
   final/contact_sheet.png
+  final/white_position_lock_overlay.png
   reports/module_scores.json
+  reports/structure_scores.json
+  reports/multiview_score.json
+  reports/stages.json
+  reports/white_model_position_lock.json
+  reports/final_position_retry_plan.json
+  reports/image2_flow_audit.json
   reports/agent_report.json
 ```
 
@@ -321,6 +337,11 @@ Useful entry points:
 The current technical report artifacts live under `reports/`, including:
 
 - `reports/Harmonize3D_Technical_Report.pdf`
+- `reports/Harmonize3D_完整技术报告_20260622.md`
+- `reports/Harmonize3D_完整技术报告_20260622.html`
+- `reports/Harmonize3D_完整技术报告_20260622.pdf`
+- `reports/论文.docx`
+- `reports/论文.pdf`
 - `reports/harmonize3d_technical_report_content.json`
 - `reports/flux2_staged_weight_matrix_20260613.md`
 - `reports/zimage_meshlock_validation_20260614.md`

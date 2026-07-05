@@ -12,13 +12,18 @@ from local3dai.auto_scene import (
     AutoSceneOptions,
     ExternalImagegenRequired,
     SceneToolExecutor,
+    _extract_concept_camera_target,
     _module_reference_prompt_with_safety,
     _pending_external_imagegen_summary,
+    _score_camera_preview_image,
     apply_module_review_revisions,
     audit_auto_scene_image2_flow,
     assemble_scene,
     call_model_scene_planner,
     create_concept_final_comparison,
+    create_final_position_retry_plan,
+    create_white_model_position_lock_report,
+    create_white_model_position_contract,
     generate_concept_image,
     generate_codex_image2_final_render,
     generate_model_module_plan,
@@ -33,10 +38,11 @@ from local3dai.auto_scene import (
     render_scene_channels,
     review_module_reference_images,
     run_auto_scene,
+    select_scene_camera,
     validate_module_layout_contract,
 )
 from local3dai.manifest import read_manifest, write_manifest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 class AutoSceneTest(unittest.TestCase):
@@ -692,6 +698,14 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(summary["stage"], "concept_image_generation")
             self.assertTrue(Path(summary["external_imagegen"]["request_path"]).exists())
             self.assertEqual(read_manifest(root / "auto_scene_summary.json")["status"], "awaiting_external_imagegen")
+            stages = read_manifest(summary["stages"])
+            by_id = {stage["id"]: stage for stage in stages["stages"]}
+            self.assertEqual(stages["status"], "awaiting_external_imagegen")
+            self.assertEqual(by_id["concept"]["status"], "awaiting_external_imagegen")
+            self.assertTrue(by_id["concept"]["message"])
+            self.assertIn("concept_image_request", by_id["concept"]["artifacts"])
+            self.assertIn("error", by_id["concept"])
+            self.assertIn("retry_count", by_id["concept"])
 
     def test_auto_scene_resume_reuses_existing_scene_and_module_plans(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -967,6 +981,12 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(module_manifest["prompt_file"]).is_absolute())
             self.assertTrue(Path(summary["final_image"]).is_absolute())
             self.assertTrue(Path(summary["final_image"]).exists())
+            self.assertTrue(Path(summary["image2_flow_audit"]).exists())
+            image2_audit = read_manifest(summary["image2_flow_audit"])
+            self.assertEqual(image2_audit["type"], "auto_scene_image2_flow_audit")
+            self.assertEqual(summary["capabilities"]["image2_flow_audit"]["status"], image2_audit["status"])
+            tool_calls = [item["tool"] for item in read_manifest(summary["tool_calls"])["calls"]]
+            self.assertIn("image2_flow_audit", tool_calls)
 
     def test_real_module_reference_requires_external_imagegen_when_image_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1218,6 +1238,46 @@ class AutoSceneTest(unittest.TestCase):
                     ]
                 },
             )
+            final_render_dir = root / "renders" / "view_hero"
+            final_render_dir.mkdir(parents=True)
+            final_input_images = []
+            for role, channel in (
+                ("white_model_rgb_position_lock", "rgb"),
+                ("edge_silhouette_lock", "edge"),
+                ("mask_composition_reference", "mask"),
+            ):
+                channel_path = final_render_dir / f"{channel}.png"
+                Image.new("RGB", (32, 32), (218, 220, 224)).save(channel_path)
+                final_input_images.append({"role": role, "channel": channel, "path": str(channel_path)})
+            position_contract = {
+                "view_id": "view_hero",
+                "status": "pass",
+                "source_rgb": str(final_render_dir / "rgb.png"),
+                "bbox_norm": [0.0, 0.0, 1.0, 1.0],
+                "center_norm": [0.5, 0.5],
+                "coverage_ratio": 1.0,
+            }
+            write_manifest(
+                root / "reports" / "white_model_position_contract.json",
+                {"type": "white_model_position_contract", "status": "pass", "contracts": [position_contract]},
+            )
+            write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "provider": "codex_builtin_image2",
+                    "white_model_position_contract": str(root / "reports" / "white_model_position_contract.json"),
+                    "planning_images_excluded_from_final_inputs": [str(concept.resolve())],
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "input_images": final_input_images,
+                            "position_lock": {"primary_reference_role": "white_model_rgb_position_lock"},
+                            "position_lock_contract": position_contract,
+                        }
+                    ],
+                },
+            )
             write_manifest(
                 root / "auto_scene_summary.json",
                 {
@@ -1238,6 +1298,10 @@ class AutoSceneTest(unittest.TestCase):
 
             self.assertEqual(report["status"], "pass")
             self.assertEqual(report["passed_required_checks"], report["required_checks"])
+            passed = {check["id"] for check in report["checks"] if check["status"] == "pass"}
+            self.assertIn("final_image2_uses_white_model_channels", passed)
+            self.assertIn("final_image2_excludes_planning_images", passed)
+            self.assertIn("final_image2_has_white_model_position_contract", passed)
             self.assertTrue((root / "reports" / "image2_flow_audit.json").exists())
 
     def test_audit_auto_scene_image2_flow_fails_non_codex_reference_source(self) -> None:
@@ -1426,15 +1490,30 @@ class AutoSceneTest(unittest.TestCase):
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
             item = request["requests"][0]
             self.assertTrue(Path(item["output_path"]).is_absolute())
+            self.assertTrue(Path(request["white_model_position_contract"]).exists())
+            self.assertEqual(item["position_lock_contract"]["status"], "pass")
+            self.assertEqual(len(item["position_lock_contract"]["bbox_norm"]), 4)
+            self.assertEqual(len(item["position_lock_contract"]["center_norm"]), 2)
             roles = {entry["role"] for entry in item["input_images"]}
             self.assertIn("white_model_rgb_position_lock", roles)
             self.assertIn("edge_silhouette_lock", roles)
             self.assertIn("mask_composition_reference", roles)
-            self.assertIn("appearance_style_reference_only", roles)
+            self.assertNotIn("appearance_style_reference_only", roles)
+            self.assertNotIn(str(concept.resolve()), json.dumps(item["input_images"], ensure_ascii=False))
+            self.assertEqual(request["planning_images_excluded_from_final_inputs"], [str(concept.resolve())])
+            self.assertEqual(item["position_lock"]["style_source"], "prompt_plan.render_prompt")
+            self.assertEqual(item["position_lock"]["contract_source"], request["white_model_position_contract"])
             self.assertIn("exact geometry", item["prompt"])
+            self.assertIn("White-model position contract", item["prompt"])
+            prompt_lower = item["prompt"].lower()
+            self.assertNotIn("hypercar", prompt_lower)
+            self.assertNotIn("hero car", prompt_lower)
+            self.assertNotIn("robot arm", prompt_lower)
+            self.assertNotIn("automotive launch booth", prompt_lower)
             self.assertEqual(item["position_lock"]["primary_reference_role"], "white_model_rgb_position_lock")
             handoff_text = Path(request["codex_image2_handoff"]).read_text(encoding="utf-8")
             self.assertIn("white_model_rgb_position_lock", handoff_text)
+            self.assertIn("White-model position contract", handoff_text)
             self.assertIn("view_hero=/path/to/codex-image2-output-1.png", handoff_text)
             self.assertIn("auto-scene-import-latest-image2", handoff_text)
 
@@ -1514,6 +1593,127 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("visual_entropy", report["failure_reasons"])
             self.assertTrue((root / "final" / "concept_vs_final.png").exists())
 
+    def test_white_model_position_lock_report_flags_layout_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            rect = (82, 148, 430, 312)
+            rgb = Image.new("RGB", (512, 512), (224, 228, 232))
+            ImageDraw.Draw(rgb).rectangle(rect, fill=(238, 240, 242), outline=(30, 36, 44), width=4)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            mask = Image.new("L", (512, 512), 0)
+            ImageDraw.Draw(mask).rectangle(rect, fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            edge = Image.new("L", (512, 512), 0)
+            ImageDraw.Draw(edge).rectangle(rect, outline=255, width=5)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            render_manifest = write_manifest(
+                root / "renders" / "render_manifest.json",
+                {"views": [{"view_id": "view_hero", "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}}]},
+            )
+            aligned = root / "final" / "aligned.png"
+            aligned.parent.mkdir(parents=True)
+            aligned_img = Image.new("RGB", (512, 512), (224, 228, 232))
+            ImageDraw.Draw(aligned_img).rectangle(rect, fill=(245, 246, 247), outline=(32, 40, 50), width=4)
+            aligned_img.save(aligned)
+            aligned_report = create_white_model_position_lock_report(
+                final_image=aligned,
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "aligned_lock.json",
+                output_image=root / "final" / "aligned_lock.png",
+            )
+            self.assertEqual(aligned_report["status"], "pass")
+            self.assertGreaterEqual(aligned_report["metrics"]["total"], 0.58)
+            self.assertTrue((root / "final" / "aligned_lock.png").exists())
+
+            shifted = root / "final" / "shifted.png"
+            shifted_img = Image.new("RGB", (512, 512), (224, 228, 232))
+            ImageDraw.Draw(shifted_img).rectangle((238, 56, 500, 182), fill=(245, 246, 247), outline=(32, 40, 50), width=4)
+            shifted_img.save(shifted)
+            shifted_report = create_white_model_position_lock_report(
+                final_image=shifted,
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "shifted_lock.json",
+                output_image=root / "final" / "shifted_lock.png",
+            )
+            self.assertEqual(shifted_report["status"], "needs_review")
+            self.assertIn("center_alignment", shifted_report["failure_reasons"])
+
+    def test_final_position_retry_plan_uses_white_model_channels_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (32, 34, 38))
+                ImageDraw.Draw(image).rectangle((24, 40, 104, 92), fill=(230, 232, 236), outline=(90, 160, 240), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            self.assertEqual(contract["status"], "pass")
+            final_request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "provider": "codex_builtin_image2",
+                    "white_model_position_contract": str(root / "reports" / "white_model_position_contract.json"),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "kind": "final_render",
+                            "output_path": str(root / "final" / "final_view_hero.png"),
+                            "prompt": "polished product render",
+                            "input_images": [
+                                {"role": "white_model_rgb_position_lock", "channel": "rgb", "path": files["rgb"]},
+                                {"role": "edge_silhouette_lock", "channel": "edge", "path": files["edge"]},
+                                {"role": "mask_composition_reference", "channel": "mask", "path": files["mask"]},
+                            ],
+                            "position_lock_contract": contract["contracts"][0],
+                            "position_lock": {"primary_reference_role": "white_model_rgb_position_lock"},
+                        }
+                    ],
+                },
+            )
+            white_lock_report = {
+                "type": "white_model_position_lock",
+                "status": "needs_review",
+                "final_image": str(root / "final" / "final_view_hero.png"),
+                "metrics": {"center_alignment": 0.2, "scale_alignment": 0.4},
+                "failure_reasons": ["center_alignment", "scale_alignment"],
+            }
+
+            retry = create_final_position_retry_plan(
+                workdir=root,
+                final_request_path=final_request_path,
+                white_lock_report=white_lock_report,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+                output_report=root / "reports" / "final_position_retry_plan.json",
+            )
+
+            self.assertEqual(retry["status"], "awaiting_codex_image2_retry")
+            retry_request = read_manifest(retry["retry_request"])
+            self.assertEqual(retry_request["provider"], "codex_builtin_image2")
+            item = retry_request["requests"][0]
+            self.assertEqual(item["kind"], "final_render_position_retry")
+            self.assertIn("center_alignment", item["prompt"])
+            roles = {entry["role"] for entry in item["input_images"]}
+            self.assertIn("white_model_rgb_position_lock", roles)
+            self.assertNotIn("appearance_style_reference_only", roles)
+            self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
+            self.assertTrue(Path(retry["codex_image2_handoff"]).exists())
+
     def test_auto_scene_workflow_mock_writes_required_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1526,19 +1726,33 @@ class AutoSceneTest(unittest.TestCase):
                 "global_concept",
                 "module_plan",
                 "module_asset_manifest",
+                "module_mesh_sanity",
+                "module_assets_index",
+                "module_references_contact_sheet",
                 "scene_assembly",
                 "final_scene_manifest",
                 "scene_model_path",
+                "assembly_report",
                 "scene_preview",
                 "camera_plan",
                 "render_manifest",
+                "white_model_position_contract",
+                "white_position_contract_overlay",
+                "white_render",
+                "white_channel_contact_sheet",
                 "module_scores",
+                "structure_scores",
+                "multiview_score",
                 "agent_report",
                 "tool_calls",
                 "concept_final_comparison",
                 "concept_vs_final",
+                "white_model_position_lock",
+                "white_position_lock_overlay",
+                "final_position_retry_plan",
                 "final_image",
                 "contact_sheet",
+                "stages",
             ]
             for key in required:
                 self.assertTrue(Path(summary[key]).exists(), key)
@@ -1555,10 +1769,80 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(concept_generation["prompt_file"]).exists())
             module_review = read_manifest(summary["module_reference_review"])
             self.assertEqual(module_review["status"], "pass")
+            white_lock = read_manifest(summary["white_model_position_lock"])
+            self.assertIn(white_lock["status"], {"pass", "needs_review"})
+            self.assertIn("total", white_lock["metrics"])
+            self.assertEqual(summary["capabilities"]["white_model_position_lock"]["status"], white_lock["status"])
+            stages = read_manifest(summary["stages"])
+            self.assertEqual(stages["type"], "auto_scene_stages")
+            self.assertEqual(stages["stage_count"], len(stages["stages"]))
+            by_id = {stage["id"]: stage for stage in stages["stages"]}
+            self.assertEqual(set(by_id), set([
+                "understand",
+                "concept",
+                "decompose",
+                "module_reference",
+                "module_3d",
+                "module_check",
+                "layout",
+                "scene_preview",
+                "camera",
+                "render",
+                "agent",
+                "score",
+                "consistency",
+                "package",
+                "complete",
+            ]))
+            for stage in stages["stages"]:
+                self.assertIn(stage["status"], {"complete", "needs_review", "pending", "failed", "awaiting_external_imagegen"})
+                self.assertIn("artifacts", stage)
+                self.assertIn("warnings", stage)
+                self.assertIn("error", stage)
+                self.assertIn("retry_count", stage)
+                self.assertTrue(stage["message"])
+            self.assertIn("global_concept", by_id["concept"]["artifacts"])
+            self.assertIn("module_assets_index", by_id["module_reference"]["artifacts"])
+            self.assertIn("module_references_contact_sheet", by_id["module_reference"]["artifacts"])
+            self.assertIn("module_mesh_sanity", by_id["module_check"]["artifacts"])
+            self.assertIn("assembly_report", by_id["scene_preview"]["artifacts"])
+            self.assertIn("render_manifest", by_id["render"]["artifacts"])
+            self.assertIn("white_render", by_id["render"]["artifacts"])
+            self.assertIn("white_channel_contact_sheet", by_id["render"]["artifacts"])
+            self.assertIn("white_model_position_contract", by_id["agent"]["artifacts"])
+            self.assertIn("white_position_contract_overlay", by_id["agent"]["artifacts"])
+            self.assertIn("structure_scores", by_id["score"]["artifacts"])
+            self.assertIn("multiview_score", by_id["score"]["artifacts"])
+            self.assertIn("multiview_score", by_id["consistency"]["artifacts"])
+            self.assertIn("white_model_position_lock", by_id["package"]["artifacts"])
+            self.assertIn("final_position_retry_plan", by_id["package"]["artifacts"])
             module_plan = read_manifest(summary["module_plan"])
             self.assertEqual(module_plan["modules"][0]["module_id"], "primary_subject")
             modules = read_manifest(summary["module_asset_manifest"])["modules"]
+            mesh_sanity = read_manifest(summary["module_mesh_sanity"])
+            self.assertEqual(mesh_sanity["type"], "module_mesh_sanity")
+            self.assertEqual(mesh_sanity["status"], "pass")
+            self.assertEqual(summary["capabilities"]["module_mesh_sanity"]["status"], "pass")
+            position_contract = read_manifest(summary["white_model_position_contract"])
+            self.assertEqual(position_contract["type"], "white_model_position_contract")
+            self.assertEqual(position_contract["status"], "pass")
+            self.assertGreaterEqual(position_contract["contract_count"], 1)
+            self.assertTrue(Path(summary["white_position_contract_overlay"]).exists())
+            retry_plan = read_manifest(summary["final_position_retry_plan"])
+            self.assertEqual(retry_plan["type"], "final_position_retry_plan")
+            self.assertIn(retry_plan["status"], {"not_needed", "not_applicable", "awaiting_codex_image2_retry"})
             self.assertGreaterEqual(len(modules), 3)
+            module_index = read_manifest(summary["module_assets_index"])
+            self.assertEqual(module_index["type"], "module_assets_index")
+            self.assertEqual(module_index["module_count"], len(modules))
+            self.assertTrue(Path(module_index["module_reference_contact_sheet"]).exists())
+            indexed_by_id = {item["module_id"]: item for item in module_index["modules"]}
+            self.assertEqual(set(indexed_by_id), {item["module_id"] for item in modules})
+            for item in module_index["modules"]:
+                self.assertTrue(Path(item["reference_image"]).exists(), item["module_id"])
+                self.assertTrue(Path(item["model_path"]).exists(), item["module_id"])
+                self.assertTrue(item["reference_exists"], item["module_id"])
+                self.assertTrue(item["model_exists"], item["module_id"])
             hero_asset = next(item for item in modules if item["module_id"] == module_plan["modules"][0]["module_id"])
             self.assertGreaterEqual(hero_asset["sanity"]["vertices"], 8)
             self.assertEqual(hero_asset["sanity"]["status"], "pass")
@@ -1568,12 +1852,18 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(hero_reference["created_by"], "mock_image2_generation")
             self.assertTrue(Path(hero_reference["prompt_file"]).exists())
             assembly_report = read_manifest(Path(summary["scene_model_path"]).with_name("assembly_report.json"))
+            self.assertEqual(summary["assembly_report"], str(Path(summary["scene_model_path"]).with_name("assembly_report.json").resolve()))
+            final_scene_manifest = read_manifest(summary["final_scene_manifest"])
+            self.assertEqual(final_scene_manifest["assembly_report"], summary["assembly_report"])
             self.assertEqual(assembly_report["geometry_generator"], "hybrid_scene_proxy_v4_external_modules")
             self.assertEqual(assembly_report["coordinate_export"], "blender_z_up_to_gltf_y_up")
             self.assertGreater(assembly_report["vertices"], 8)
             render_manifest = read_manifest(summary["render_manifest"])
             self.assertEqual(render_manifest["scene_model_path"], summary["scene_model_path"])
             self.assertIn("module_ids_visible", render_manifest["views"][0])
+            self.assertEqual(summary["white_render"], render_manifest["views"][0]["files"]["rgb"])
+            self.assertTrue(Path(summary["white_render"]).exists())
+            self.assertTrue(Path(summary["white_channel_contact_sheet"]).exists())
             self.assertEqual(
                 summary["reference_policy"]["final_ai_inputs"],
                 [
@@ -1585,6 +1875,56 @@ class AutoSceneTest(unittest.TestCase):
                     "render_manifest.skeleton_from_mask",
                 ],
             )
+
+    def test_camera_preview_scoring_uses_concept_composition_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept = root / "concept.png"
+            matching = root / "matching.png"
+            shifted = root / "shifted.png"
+
+            for path, rect in (
+                (concept, (120, 190, 285, 320)),
+                (matching, (120, 190, 285, 320)),
+                (shifted, (290, 190, 455, 320)),
+            ):
+                image = Image.new("RGB", (512, 512), (18, 22, 28))
+                draw = ImageDraw.Draw(image)
+                draw.rectangle(rect, fill=(236, 240, 245), outline=(80, 180, 255), width=4)
+                draw.rectangle((rect[0] + 28, rect[1] + 42, rect[2] - 28, rect[3] - 32), outline=(20, 45, 70), width=3)
+                image.save(path)
+
+            target = _extract_concept_camera_target(concept)
+            self.assertEqual(target["status"], "pass")
+            match_score = _score_camera_preview_image(matching, concept_target=target)
+            shifted_score = _score_camera_preview_image(shifted, concept_target=target)
+            self.assertGreater(match_score["concept_center_score"], shifted_score["concept_center_score"])
+            self.assertGreater(match_score["score"], shifted_score["score"])
+
+    def test_select_scene_camera_records_concept_target_when_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept = root / "concept.png"
+            image = Image.new("RGB", (256, 256), (20, 22, 26))
+            ImageDraw.Draw(image).rectangle((70, 96, 190, 170), fill=(230, 234, 240))
+            image.save(concept)
+            scene_model = root / "scene.glb"
+            scene_model.write_bytes(b"glTF")
+
+            selection = select_scene_camera(
+                root,
+                {"scene_model_path": str(scene_model)},
+                {"views": [{"view_id": "view_hero", "azimuth_deg": 310.0}]},
+                views=3,
+                config={},
+                render_backend="procedural",
+                dry_run=True,
+                concept_image=concept,
+            )
+
+            report = read_manifest(selection["report_path"])
+            self.assertEqual(report["status"], "skipped")
+            self.assertEqual(report["concept_camera_target"]["status"], "pass")
 
     def test_external_hero_model_is_preserved_for_scene_assembly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1670,6 +2010,62 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(asset["sanity"]["hunyuan_profile"], "high")
             self.assertEqual(seen_overrides["steps"], 40)
             self.assertEqual(seen_overrides["octree_resolution"], 512)
+
+    def test_module_assets_flag_platform_mesh_that_is_not_low_slab(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "modules" / "display_platform" / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (180, 180, 180)).save(reference)
+            module_plan = {
+                "modules": [
+                    {
+                        "module_id": "display_platform",
+                        "name": "low display platform",
+                        "role": "supporting_object",
+                        "category": "stage_prop",
+                        "generate_3d": True,
+                        "expected_real_world_size": {"width": 5.0, "depth": 4.0, "height": 0.25, "unit": "meters"},
+                    }
+                ]
+            }
+
+            def fake_hunyuan_shape(**kwargs: object) -> Path:
+                from local3dai.auto_scene import write_module_proxy_glb
+
+                output_model = Path(kwargs["output_model"])
+                write_module_proxy_glb(
+                    output_model,
+                    {
+                        "module_id": "generic_tall_block",
+                        "expected_real_world_size": {"width": 1.0, "depth": 1.0, "height": 3.0, "unit": "meters"},
+                    },
+                )
+                write_manifest(Path(kwargs["metadata"]), {"backend": "fake_hunyuan", "mesh_sanity": {"status": "pass"}})
+                return output_model
+
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            config = {
+                "models": {
+                    "hunyuan3d_2_1_shape": {
+                        "enabled": True,
+                        "default_profile": "high",
+                        "profiles": {"high": {"steps": 40, "octree_resolution": 512}},
+                    }
+                },
+            }
+            with patch("local3dai.workflow._run_hunyuan_shape", side_effect=fake_hunyuan_shape):
+                assets = generate_module_assets(root, module_plan, allow_fallback=True, config=config, options=options)
+
+            asset = assets["modules"][0]
+            self.assertEqual(assets["status"], "needs_review")
+            self.assertEqual(assets["quality_issues"][0]["module_id"], "display_platform")
+            semantic = asset["sanity"]["semantic_mesh_sanity"]
+            self.assertEqual(semantic["status"], "needs_review")
+            codes = {flag["code"] for flag in semantic["flags"]}
+            self.assertIn("platform_not_low_slab", codes)
 
 
 if __name__ == "__main__":

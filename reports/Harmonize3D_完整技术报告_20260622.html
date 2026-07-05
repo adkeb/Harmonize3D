@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<base href="file:///root/sakura/work/Harmonize3D/reports/">
+<title>Harmonize3D_完整技术报告_20260622</title>
+<style>
+@page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+* { box-sizing: border-box; }
+body {
+  font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "WenQuanYi Micro Hei", Arial, sans-serif;
+  color: #1f2933;
+  line-height: 1.62;
+  font-size: 11.2pt;
+  background: #fff;
+}
+h1, h2, h3, h4 { color: #111827; line-height: 1.28; page-break-after: avoid; }
+h1 { font-size: 25pt; border-bottom: 2px solid #1f2937; padding-bottom: 8px; margin: 0 0 18px; }
+h2 { font-size: 18pt; margin-top: 28px; border-bottom: 1px solid #d1d5db; padding-bottom: 5px; }
+h3 { font-size: 14pt; margin-top: 20px; }
+h4 { font-size: 12pt; }
+p { margin: 8px 0; }
+a { color: #1d4ed8; text-decoration: none; }
+blockquote { border-left: 4px solid #9ca3af; margin: 14px 0; padding: 8px 12px; background: #f9fafb; color: #374151; }
+code { font-family: "Cascadia Mono", "Consolas", "Menlo", monospace; font-size: 9.5pt; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+pre { background: #111827; color: #f9fafb; padding: 12px; border-radius: 6px; overflow-wrap: anywhere; white-space: pre-wrap; page-break-inside: avoid; }
+pre code { background: transparent; color: inherit; padding: 0; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0; page-break-inside: avoid; font-size: 10pt; }
+th, td { border: 1px solid #d1d5db; padding: 6px 8px; vertical-align: top; }
+th { background: #eef2f7; font-weight: 700; }
+img { max-width: 100%; height: auto; display: block; margin: 12px auto; page-break-inside: avoid; border: 1px solid #e5e7eb; }
+ul, ol { padding-left: 1.4em; }
+li { margin: 3px 0; }
+hr { border: 0; border-top: 1px solid #d1d5db; margin: 18px 0; }
+</style>
+</head>
+<body>
+<h1>Harmonize3D 完整技术报告</h1>
+<p>版本日期：2026-06-22<br />
+项目路径：<code>/root/sakura/work/Harmonize3D</code><br />
+报告类型：工程技术报告 / 阶段性系统说明<br />
+最新论文源文件：<code>reports/论文.docx</code></p>
+<blockquote>
+<p>说明：本报告基于当前代码库、README、论文镜像、Auto Scene 最新实现和最近一次回归验证整理生成，不覆盖 <code>reports/论文.docx</code>。</p>
+</blockquote>
+<h2>1. 摘要</h2>
+<p>Harmonize3D 是一个本地 3D 结构约束 AI 渲染与场景生成工作台。系统的核心目标不是直接让图像模型自由生成一张图片，而是先建立可追踪的 3D 结构、相机状态和渲染通道，再让 AI 图像模型在这些结构约束下完成材质化、光影和最终视觉表现。</p>
+<p>项目已经从单对象闭环扩展到模块化 Auto Scene Agent。当前系统支持以下路径：</p>
+<pre><code class="language-text">自然语言需求
+-&gt; qwen3.7-plus 需求理解 / 概念规划
+-&gt; Codex image2 概念图 handoff/import
+-&gt; qwen3.7-plus 概念图审查
+-&gt; qwen3.7-plus 模块拆解与单物体提示词
+-&gt; Codex image2 模块参考图 handoff/import
+-&gt; qwen3.7-plus 模块参考图审查
+-&gt; Hunyuan3D 2.1 模块级 image-to-3D
+-&gt; 3D 场景装配
+-&gt; Blender / procedural 白模通道
+-&gt; Codex image2 或本地 AI 最终渲染
+-&gt; 自动评分、概念对比、流程审计
+</code></pre>
+<p>截至本报告生成时，真实 Auto Scene 规划已经切换为 <code>qwen3.7-plus</code> 多模态模型负责，真实运行中规则规划被关闭；概念图、部件图和最终图均可通过 Codex image2 handoff/import 机制进入流程；新增 <code>auto-scene-audit-image2-flow</code> 可检查一个 workdir 是否真正符合“模型规划、Codex image2 生图、模型审查、3D AI 生成”的目标链路。</p>
+<p>当前仍需明确的限制是：Codex 内置 image2 工具在本线程中可以生成图像，但没有稳定把本次生成产物落盘到 <code>$CODEX_HOME/generated_images</code>。因此项目已提供两种承接方式：显式导入命令 <code>auto-scene-import-image2</code> 和自动扫描最新产物的 <code>auto-scene-import-latest-image2</code>。完整无人值守闭环仍依赖 Codex image2 产物路径稳定暴露。</p>
+<h2>2. 项目目标与边界</h2>
+<h3>2.1 技术目标</h3>
+<p>Harmonize3D 的目标是建立一个可审计的 3D-grounded AI rendering 流程：</p>
+<ol>
+<li>用户可以用自然语言或图像提出产品、车辆、展台等视觉生成需求。</li>
+<li>系统先生成或导入 3D 结构，而不是直接把最终图交给图像模型自由发挥。</li>
+<li>相机、模块、通道、候选、评分和最终图均写入 manifest，便于复盘。</li>
+<li>AI 图像模型负责视觉表现，3D 模型和渲染通道负责结构约束。</li>
+<li>Agent 负责规划、工具调度、图像审查、失败定位和迭代。</li>
+</ol>
+<h3>2.2 非目标</h3>
+<p>当前阶段不把以下内容作为已完成目标：</p>
+<ul>
+<li>不宣称已经具备工业级全自动场景生成质量。</li>
+<li>不宣称最终 AI 渲染一定严格服从白模位置。</li>
+<li>不把旧 DashScope 图像生成结果视为当前 Codex image2 链路完成证据。</li>
+<li>不把 mock/procedural fallback 当作真实 3D AI 生成成功。</li>
+<li>不把单次漂亮成图当作流程正确性的证明。</li>
+</ul>
+<h2>3. 系统总体架构</h2>
+<pre><code class="language-mermaid">flowchart LR
+  U[&quot;用户需求&quot;] --&gt; P[&quot;qwen3.7-plus&lt;br/&gt;需求理解 / 概念规划&quot;]
+  P --&gt; CReq[&quot;concept_prompt&lt;br/&gt;Codex image2 request&quot;]
+  CReq --&gt; CImg[&quot;概念图&quot;]
+  CImg --&gt; CReview[&quot;qwen3.7-plus&lt;br/&gt;概念审查&quot;]
+  CReview --&gt; MPlan[&quot;qwen3.7-plus&lt;br/&gt;模块拆解 / reference_prompt&quot;]
+  MPlan --&gt; MReq[&quot;Codex image2&lt;br/&gt;模块参考图请求&quot;]
+  MReq --&gt; MImg[&quot;单物体参考图&quot;]
+  MImg --&gt; MReview[&quot;qwen3.7-plus&lt;br/&gt;模块图审查&quot;]
+  MReview --&gt; H3D[&quot;Hunyuan3D 2.1&lt;br/&gt;模块 GLB&quot;]
+  H3D --&gt; Assemble[&quot;3D 场景装配&quot;]
+  Assemble --&gt; Channels[&quot;Blender / procedural&lt;br/&gt;白模结构通道&quot;]
+  Channels --&gt; Final[&quot;最终 AI / Codex image2 渲染&quot;]
+  Final --&gt; Audit[&quot;评分 / 概念对比 / 流程审计&quot;]
+</code></pre>
+<p>系统由以下核心层组成：</p>
+<table>
+<thead>
+<tr>
+<th>层级</th>
+<th>主要职责</th>
+<th>关键产物</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>需求理解与规划层</td>
+<td>使用 <code>qwen3.7-plus</code> 扩写需求、生成场景计划、概念提示词和相机计划</td>
+<td><code>auto_task.json</code>, <code>scene_plan.json</code>, <code>concept_image_plan.json</code>, <code>camera_plan.json</code></td>
+</tr>
+<tr>
+<td>概念图层</td>
+<td>使用 Codex image2 生成全局概念图，并交回模型审查</td>
+<td><code>concept/global_concept.png</code>, <code>concept/concept_review.json</code></td>
+</tr>
+<tr>
+<td>模块拆解层</td>
+<td>模型根据概念图和场景计划生成每个物体的单独参考图提示词</td>
+<td><code>modules/module_plan.json</code>, <code>modules/module_prompt_info.json</code></td>
+</tr>
+<tr>
+<td>模块参考图层</td>
+<td>使用 Codex image2 生成纯色背景、正视图、单物体参考图</td>
+<td><code>modules/&lt;module_id&gt;/reference.png</code></td>
+</tr>
+<tr>
+<td>模块审查层</td>
+<td>将模块参考图返回给 <code>qwen3.7-plus</code> 审查，失败时生成修订 prompt</td>
+<td><code>modules/module_reference_review.json</code></td>
+</tr>
+<tr>
+<td>3D 资产层</td>
+<td>使用 Hunyuan3D 2.1 从审查通过的参考图生成模块 GLB</td>
+<td><code>modules/&lt;module_id&gt;/model.glb</code>, <code>metadata.json</code></td>
+</tr>
+<tr>
+<td>场景装配层</td>
+<td>按模型给出的尺寸、位置、旋转组装完整 3D 场景</td>
+<td><code>scene/final_scene.glb</code>, <code>scene/scene_assembly.json</code></td>
+</tr>
+<tr>
+<td>通道渲染层</td>
+<td>输出 RGB、edge、mask、depth、normal 等白模通道</td>
+<td><code>renders/render_manifest.json</code></td>
+</tr>
+<tr>
+<td>最终渲染与复核层</td>
+<td>生成最终图，评分并对比概念图、白模和最终结果</td>
+<td><code>final/*</code>, <code>reports/*</code></td>
+</tr>
+</tbody>
+</table>
+<h2>4. 关键实现状态</h2>
+<h3>4.1 qwen3.7-plus 作为真实 planner</h3>
+<p>真实 Auto Scene 运行中，<code>scene_planner</code> 使用 DashScope 多模态接口：</p>
+<ul>
+<li>基础地址：<code>https://dashscope.aliyuncs.com/api/v1</code></li>
+<li>模型：<code>qwen3.7-plus</code></li>
+<li>API Key：<code>DASHSCOPE_API_KEY</code></li>
+<li>入口函数：<code>call_model_scene_planner()</code></li>
+</ul>
+<p>真实运行要求：</p>
+<ul>
+<li><code>concept_image_plan.concept_prompt</code> 必须由模型返回。</li>
+<li><code>auto_task.expanded_request</code> 必须由模型返回。</li>
+<li>真实运行禁用规则规划。</li>
+<li><code>--no-llm</code> 仅允许 dry-run/mock。</li>
+</ul>
+<p>当前状态：已实现。</p>
+<h3>4.2 概念图与模块图不使用本地 fallback</h3>
+<p>配置中 <code>reference_generation.provider</code> 默认走 <code>external_imagegen</code>。真实运行缺图时不会自动生成 mock 图或本地图像 fallback，而是写出 Codex image2 request：</p>
+<ul>
+<li>单图请求：<code>imagegen_request.json</code></li>
+<li>批量模块请求：<code>imagegen_batch_request.json</code></li>
+<li>handoff 文档：<code>codex_image2_handoff.md</code></li>
+</ul>
+<p>请求中包含：</p>
+<ul>
+<li><code>provider: codex_builtin_image2</code></li>
+<li><code>output_path</code></li>
+<li><code>prompt</code></li>
+<li><code>source_image</code></li>
+<li><code>import_command</code></li>
+<li><code>latest_import_command</code></li>
+<li><code>codex_image2_handoff</code></li>
+</ul>
+<p>当前状态：已实现。</p>
+<h3>4.3 Codex image2 导入机制</h3>
+<p>因为 Codex 内置 image2 不提供可传入输出路径的程序接口，项目提供两种导入命令：</p>
+<p>显式导入：</p>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json \
+  --image /path/to/codex-image2-output.png
+</code></pre>
+<p>从 <code>$CODEX_HOME/generated_images</code> 扫描最新图片导入：</p>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
+</code></pre>
+<p>批量模块或最终图支持 keyed image：</p>
+<pre><code class="language-bash">--image main_vehicle=/path/to/car.png
+--image view_hero=/path/to/final.png
+</code></pre>
+<p>当前状态：已实现，但依赖 Codex image2 是否稳定落盘。</p>
+<h3>4.4 禁止 negative_prompt</h3>
+<p>当前 Auto Scene 的 Codex image2 路径不写入 <code>negative_prompt</code>。约束被要求写入正向 prompt。例如模块参考图 prompt 会要求：</p>
+<ul>
+<li>strict orthographic front view</li>
+<li>pure solid background</li>
+<li>single centered object</li>
+<li>blank unlabeled surfaces</li>
+<li>object-only catalog cutout</li>
+<li>no perspective / no three-quarter view / no scene environment</li>
+</ul>
+<p>当前状态：已实现，并有测试覆盖。</p>
+<h3>4.5 模块图使用概念图作为视觉参考</h3>
+<p>模块 reference request 会在概念图存在时把 <code>source_image</code> 指向 <code>concept/global_concept.png</code>。模型会先审查概念图，再根据概念图、场景计划和 few-shot prompt examples 生成每个模块的 <code>reference_prompt</code>。</p>
+<p>当前状态：已实现。</p>
+<h3>4.6 模块 3D 生成参数</h3>
+<p>Hunyuan3D 2.1 shape 作为主要模块级 image-to-3D 后端。当前高质量配置会提高：</p>
+<ul>
+<li>steps</li>
+<li>guidance_scale</li>
+<li>octree_resolution</li>
+<li>num_chunks</li>
+</ul>
+<p>模块 metadata 中会记录：</p>
+<ul>
+<li><code>created_by</code></li>
+<li><code>hunyuan_profile</code></li>
+<li><code>hunyuan_shape_overrides</code></li>
+<li><code>source_reference</code></li>
+<li><code>model_path</code></li>
+</ul>
+<p>严格链路下，<code>created_by</code> 应为 <code>hunyuan3d_2_1_shape_from_reviewed_reference</code>，且 <code>fallback_used</code> 应为 false。</p>
+<p>当前状态：已实现，真实运行受本地 3D AI 环境和输入图质量影响。</p>
+<h3>4.7 最终图白模位置锁定</h3>
+<p>最终 Codex image2 请求会包含白模通道作为位置锁：</p>
+<ul>
+<li><code>white_model_rgb_position_lock</code></li>
+<li><code>edge_silhouette_lock</code></li>
+<li><code>depth_layout_reference</code></li>
+<li><code>normal_surface_reference</code></li>
+<li><code>mask_composition_reference</code></li>
+<li><code>appearance_style_reference_only</code></li>
+</ul>
+<p>请求说明中明确：概念图只作为风格参考，白模 RGB 和结构通道是位置、构图、尺度和轮廓的锁定依据。</p>
+<p>当前状态：已实现 request/handoff；最终图质量仍需持续验证。</p>
+<h2>5. 数据契约与主要文件</h2>
+<p>Auto Scene workdir 的核心结构如下：</p>
+<pre><code class="language-text">outputs/auto_scene/&lt;task&gt;/
+  auto_task.json
+  scene_plan.json
+  prompt_plan.json
+  concept/
+    concept_image_plan.json
+    concept_prompt.txt
+    imagegen_request.json
+    codex_image2_handoff.md
+    global_concept.png
+    concept_review.json
+  modules/
+    module_plan.json
+    module_prompt_info.json
+    imagegen_batch_request.json
+    codex_image2_batch_handoff.md
+    module_reference_review.json
+    module_asset_manifest.json
+    &lt;module_id&gt;/
+      reference_prompt.txt
+      reference.png
+      reference_manifest.json
+      preprocessed.png
+      model.glb
+      metadata.json
+      sanity.json
+  scene/
+    scene_assembly.json
+    final_scene.glb
+    scene_preview.png
+  cameras/
+    camera_plan.json
+    camera_search_report.json
+  renders/
+    render_manifest.json
+  final/
+    codex_image2_final_request.json
+    codex_image2_final_handoff.md
+    final_view_hero.png
+  reports/
+    tool_calls.json
+    module_scores.json
+    visual_judgement.json
+    concept_final_comparison.json
+    image2_flow_audit.json
+</code></pre>
+<p>这些文件的作用不是简单保存结果，而是建立可审计边界：</p>
+<ul>
+<li>planner 输出和工具执行分离。</li>
+<li>概念图和模块图只服务规划、审查、3D 生成，不直接作为最终 AI 渲染结构输入。</li>
+<li>最终渲染应以 render manifest 中的白模通道为结构依据。</li>
+<li>每个阶段都能从 manifest 追溯输入、输出和失败原因。</li>
+</ul>
+<h2>6. Agent 工具链</h2>
+<p><code>AUTO_SCENE_TOOL_SPECS</code> 定义了 Auto Scene 的工具执行序列。当前主要工具包括：</p>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scene_planner</code></td>
+<td>调用 qwen3.7-plus 进行需求理解和概念规划</td>
+</tr>
+<tr>
+<td><code>concept_image_generation</code></td>
+<td>根据模型扩写 prompt 发出 Codex image2 概念图请求</td>
+</tr>
+<tr>
+<td><code>concept_image_review</code></td>
+<td>将概念图返回 qwen3.7-plus 审查</td>
+</tr>
+<tr>
+<td><code>module_prompt_generation</code></td>
+<td>让模型根据概念图生成模块级 reference prompt</td>
+</tr>
+<tr>
+<td><code>module_reference_generation</code></td>
+<td>发出模块参考图 Codex image2 batch request</td>
+</tr>
+<tr>
+<td><code>module_reference_review</code></td>
+<td>将模块图返回模型审查</td>
+</tr>
+<tr>
+<td><code>module_image_to_3d</code></td>
+<td>使用 Hunyuan3D 生成模块 GLB</td>
+</tr>
+<tr>
+<td><code>scene_layout_agent</code></td>
+<td>计算模块位置、缩放和旋转</td>
+</tr>
+<tr>
+<td><code>scene_assembler</code></td>
+<td>装配完整 GLB 场景</td>
+</tr>
+<tr>
+<td><code>camera_candidate_search</code></td>
+<td>搜索更合适的 3D 场景视角</td>
+</tr>
+<tr>
+<td><code>render_white_channels</code></td>
+<td>渲染白模和结构通道</td>
+</tr>
+<tr>
+<td><code>final_image2_render</code></td>
+<td>发出最终 Codex image2 白模位置锁请求</td>
+</tr>
+<tr>
+<td><code>concept_final_comparison</code></td>
+<td>对比概念图、白模和最终图</td>
+</tr>
+<tr>
+<td><code>package_scene_outputs</code></td>
+<td>写出报告、contact sheet 和 summary</td>
+</tr>
+</tbody>
+</table>
+<p>所有工具调用会写入 <code>reports/tool_calls.json</code>，用于复盘。</p>
+<h2>7. 审计与验证机制</h2>
+<h3>7.1 Auto Scene image2 flow audit</h3>
+<p>新增命令：</p>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-audit-image2-flow \
+  --workdir outputs/auto_scene/demo_showroom
+</code></pre>
+<p>审计器会检查：</p>
+<ol>
+<li>planner 是否来自 <code>qwen3.7-plus</code> / DashScope 或已存在模型产物。</li>
+<li>真实运行是否关闭规则规划。</li>
+<li>概念 prompt 是否来自模型。</li>
+<li>概念图是否由 Codex image2/imported image2 提供。</li>
+<li>概念图相关 manifest 是否不含 <code>negative_prompt</code>。</li>
+<li>概念图是否由模型审查并通过。</li>
+<li>模块 prompt 是否由模型生成。</li>
+<li>模块 plan 是否不含 <code>negative_prompt</code>。</li>
+<li>模块参考图是否由 Codex image2/imported image2 提供。</li>
+<li>模块参考图是否不含 <code>negative_prompt</code>。</li>
+<li>模块参考图是否由模型审查并通过。</li>
+<li>审查通过的模块参考图是否进入 Hunyuan3D，且未使用 procedural fallback。</li>
+</ol>
+<p>审计结果写入：</p>
+<pre><code class="language-text">reports/image2_flow_audit.json
+</code></pre>
+<h3>7.2 最近验证记录</h3>
+<p>最近一次代码回归：</p>
+<pre><code class="language-text">tests/test_auto_scene.py: 38 passed
+full pytest: 80 passed
+</code></pre>
+<p>最近一次真实 pending smoke：</p>
+<pre><code class="language-text">status: awaiting_external_imagegen
+stage: concept_image_generation
+model: qwen3.7-plus
+plan_source: model_only
+rule_planning: disabled_for_real_runs
+provider: codex_builtin_image2
+negative_prompt_present: False
+</code></pre>
+<p>对旧 workdir <code>outputs/auto_scene/full_current_concept_source_v1</code> 运行严格审计时返回 fail，原因包括旧链路使用 DashScope imagegen、旧 manifest 含 <code>negative_prompt</code>、部分审查状态不是 pass。这是预期结果，说明审计器不会把旧流程误判为当前目标完成。</p>
+<h2>8. 关键实验结果与当前质量</h2>
+<p>README 中记录的 2026-06-18 Auto Scene 运行验证了完整模块化链路：</p>
+<pre><code class="language-text">concept planning -&gt; module references -&gt; module 3D -&gt; 3D scene assembly -&gt; Blender white-model channels -&gt; final AI render
+</code></pre>
+<p>该运行结果状态为 <code>needs_review</code>，不是 <code>pass</code>。关键指标：</p>
+<ul>
+<li>生成 5 个 Hunyuan3D 2.1 high-profile 模块 GLB。</li>
+<li>无 procedural fallback。</li>
+<li>module presence score: <code>0.855333</code></li>
+<li>multiview score: <code>0.789947</code></li>
+<li>minimum structure review score: <code>0.551932</code></li>
+<li>concept/final comparison 仍失败 <code>white_hero_presence</code></li>
+<li>final image central white subject ratio 约 <code>0.000431</code></li>
+</ul>
+<p>主要结论：</p>
+<ul>
+<li>模块化 3D 场景链路已经能跑通。</li>
+<li>模块级 Hunyuan3D 生成已经不再停留在 mock。</li>
+<li>最终图仍可能不严格符合白模位置和概念图主车视角。</li>
+<li>相机搜索、屏幕/面板类模块质量控制、最终图白模位置锁仍是重点改进方向。</li>
+</ul>
+<p>示例图：</p>
+<p><img src="paper_assets/module_references_contact.png" alt="模块参考图" /></p>
+<p><img src="paper_assets/concept_vs_final.png" alt="概念图与最终图对比" /></p>
+<p><img src="paper_assets/final_contact_sheet.png" alt="最终三视图 contact sheet" /></p>
+<p><img src="paper_assets/white_model_view_hero.png" alt="白模 hero view" /></p>
+<p><img src="paper_assets/final_view_hero.png" alt="最终 hero view" /></p>
+<h2>9. 运行方式</h2>
+<h3>9.1 环境检查</h3>
+<pre><code class="language-bash">cd /root/sakura/work/Harmonize3D
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-doctor --allow-not-ready
+</code></pre>
+<h3>9.2 Auto Scene 真实 planner pending smoke</h3>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene \
+  --request &quot;生成一个未来汽车发布会展台，中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面，输出三张产品级渲染图。&quot; \
+  --output outputs/auto_scene/demo_showroom \
+  --views 1 \
+  --quality fast \
+  --geometry strict \
+  --style exhibition \
+  --candidates 1 \
+  --max-retries 0 \
+  --render-backend procedural
+</code></pre>
+<p>如果停在 <code>awaiting_external_imagegen</code>，说明真实 planner 已输出 concept prompt，下一步需要 Codex image2 生成并导入概念图。</p>
+<h3>9.3 导入 Codex image2 概念图</h3>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json \
+  --image /path/to/generated-concept.png
+</code></pre>
+<p>或：</p>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 \
+  --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
+</code></pre>
+<h3>9.4 导入模块 batch</h3>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 \
+  --request outputs/auto_scene/demo_showroom/modules/imagegen_batch_request.json \
+  --image main_vehicle=/path/to/main_vehicle.png \
+  --image display_platform=/path/to/platform.png
+</code></pre>
+<h3>9.5 审计完整链路</h3>
+<pre><code class="language-bash">PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-audit-image2-flow \
+  --workdir outputs/auto_scene/demo_showroom
+</code></pre>
+<h2>10. 风险与限制</h2>
+<h3>10.1 Codex image2 产物路径限制</h3>
+<p>当前最大工程限制是 Codex 内置 image2 在本线程中未稳定把新生成图片写入可扫描路径。项目已支持 <code>$CODEX_HOME/generated_images</code> 自动扫描，但如果 Codex 不落盘，仍需显式导入图片路径。</p>
+<p>影响：</p>
+<ul>
+<li>无法在 Python CLI 内部直接调用 Codex built-in image2。</li>
+<li>无法完全无人值守完成 concept/module/final 三段图像生成。</li>
+<li>但 handoff/import 已经保证路径、prompt、source image 和后续模型审查都可追踪。</li>
+</ul>
+<h3>10.2 最终图白模位置不稳定</h3>
+<p>最终图可能偏离白模：</p>
+<ul>
+<li>主车被弱化或变暗。</li>
+<li>屏幕/平台遮挡主车。</li>
+<li>相机角度与概念图不一致。</li>
+<li>AI 模型增加未规划结构。</li>
+</ul>
+<p>已采取措施：</p>
+<ul>
+<li>最终 Codex image2 request 增加白模 RGB、edge、depth、normal、mask 输入角色。</li>
+<li>prompt 中强调 exact geometry、same screen-space module positions、same object scale。</li>
+<li>增加 concept_final_comparison 和 image2 flow audit。</li>
+</ul>
+<p>仍需继续：</p>
+<ul>
+<li>使用视觉模型对最终图与白模位置做更严格的自动审查。</li>
+<li>将相机搜索目标改为“主车正面可见 + 概念图构图相似 + 模块无遮挡”。</li>
+</ul>
+<h3>10.3 模块 3D 质量不均</h3>
+<p>Hunyuan3D 对车辆类效果相对可用，但对薄屏幕、灯带、平台等规则几何可能生成厚度异常、弯曲或细节噪声。</p>
+<p>需要补强：</p>
+<ul>
+<li>面板类 mesh sanity check。</li>
+<li>模块类别专用 3D 生成 prompt。</li>
+<li>对简单规则几何允许使用确定性 mesh generator，但必须在审计中明确标记为非 3D AI。</li>
+</ul>
+<h3>10.4 评分器仍偏轻量</h3>
+<p>当前评分主要基于轻量 CV 指标和 manifest 证据。后续需要引入 VLM 审查：</p>
+<ul>
+<li>白模与最终图主体位置是否一致。</li>
+<li>概念图关键元素是否保留。</li>
+<li>模块是否缺失或被遮挡。</li>
+<li>是否出现文字、logo、人物或额外对象。</li>
+</ul>
+<h2>11. 后续路线图</h2>
+<h3>近期</h3>
+<ol>
+<li>让 Codex image2 产物路径稳定进入 <code>$CODEX_HOME/generated_images</code> 或提供可读 output artifact。</li>
+<li>用真实 Codex image2 概念图跑通：concept -&gt; model review -&gt; module prompts。</li>
+<li>用真实 Codex image2 模块图跑通：module references -&gt; model review -&gt; Hunyuan3D。</li>
+<li>对通过审计的 workdir 生成一份新的报告图集。</li>
+</ol>
+<h3>中期</h3>
+<ol>
+<li>引入 VLM 对最终图和白模通道做位置一致性审查。</li>
+<li>改进 camera search，以概念图构图和主车可见性为硬约束。</li>
+<li>增加屏幕、灯带、平台等规则模块的 mesh sanity。</li>
+<li>建立 Auto Scene 失败类型 taxonomy。</li>
+</ol>
+<h3>长期</h3>
+<ol>
+<li>将 Auto Scene 从单案例扩展到产品、室内、建筑、游戏资产等多类场景。</li>
+<li>引入 face/part-level visibility buffer，提升多视角一致性。</li>
+<li>建立人工标注 benchmark，评估结构遵从、模块完整性和概念一致性。</li>
+<li>把 handoff/import 机制升级为可编排的跨工具 asset bus。</li>
+</ol>
+<h2>12. 结论</h2>
+<p>Harmonize3D 当前已经形成一条清晰的工程路线：用 <code>qwen3.7-plus</code> 负责需求理解和多模态审查，用 Codex image2 负责概念图与模块参考图生成，用 Hunyuan3D 负责模块级 3D 资产生成，用 Blender/程序化渲染负责白模结构通道，用最终 AI/Codex image2 负责成品图表现，并用审计器验证流程是否真实符合目标。</p>
+<p>项目的价值不在于单张图是否足够好看，而在于每一步都能被记录、复盘和修正。最新实现已经把“概念规划 -&gt; 模块参考 -&gt; 模块 3D -&gt; 3D 场景组装 -&gt; 白模通道 -&gt; 最终渲染”的工程框架搭起来，并进一步把 Codex image2 的外部 handoff/import 变成了可审计的数据契约。当前主要未完成点是 Codex 内置 image2 的产物路径自动回填，以及最终图对白模位置的强约束。下一阶段应围绕这两个问题继续收敛。</p>
+
+</body>
+</html>

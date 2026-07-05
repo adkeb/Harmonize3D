@@ -55,6 +55,91 @@ AUTO_SCENE_STAGE_IDS = [
     "complete",
 ]
 
+AUTO_SCENE_STAGE_LABELS = {
+    "understand": "Requirement understanding",
+    "concept": "Global concept image",
+    "decompose": "Module decomposition",
+    "module_reference": "Module reference images",
+    "module_3d": "Module image-to-3D",
+    "module_check": "Module mesh sanity",
+    "layout": "Scene layout",
+    "scene_preview": "Scene assembly preview",
+    "camera": "Camera planning",
+    "render": "Blender white channels",
+    "agent": "Final AI rendering",
+    "score": "Candidate and module scoring",
+    "consistency": "Multi-view consistency",
+    "package": "Packaging and reports",
+    "complete": "Final output",
+}
+
+AUTO_SCENE_STAGE_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
+    "understand": ("auto_task", "scene_plan", "tool_calls", "run_log"),
+    "concept": ("concept_image_plan", "global_concept", "concept_review", "concept_image_request", "concept_image2_handoff"),
+    "decompose": ("module_plan", "module_prompt_info", "module_layout_check"),
+    "module_reference": (
+        "module_plan",
+        "module_reference_review",
+        "module_reference_batch_request",
+        "module_reference_image2_handoff",
+        "module_assets_index",
+        "module_references_contact_sheet",
+    ),
+    "module_3d": ("module_asset_manifest", "module_assets_index"),
+    "module_check": ("module_asset_manifest", "module_mesh_sanity", "module_assets_index"),
+    "layout": ("scene_assembly",),
+    "scene_preview": ("final_scene_manifest", "scene_model_path", "scene_preview", "assembly_report"),
+    "camera": ("camera_plan", "camera_search_report", "camera_search_sheet"),
+    "render": ("render_manifest", "white_render", "white_channel_contact_sheet"),
+    "agent": ("white_model_position_contract", "white_position_contract_overlay", "agent_report", "final_image", "comparison_image", "contact_sheet", "final_image2_request"),
+    "score": ("module_scores", "structure_scores", "multiview_score"),
+    "consistency": ("multiview_score",),
+    "package": (
+        "visual_judgement",
+        "concept_final_comparison",
+        "concept_vs_final",
+        "white_model_position_lock",
+        "white_position_lock_overlay",
+        "final_position_retry_plan",
+        "image2_flow_audit",
+        "tool_calls",
+    ),
+    "complete": ("final_image", "contact_sheet", "stages", "run_log"),
+}
+
+AUTO_SCENE_PENDING_STAGE_MAP = {
+    "concept_image_generation": "concept",
+    "concept_image_regeneration": "concept",
+    "module_reference_generation": "module_reference",
+    "module_reference_regeneration": "module_reference",
+    "final_image2_render": "agent",
+}
+
+AUTO_SCENE_TOOL_STAGE_MAP = {
+    "scene_planner": "understand",
+    "concept_image_generation": "concept",
+    "concept_image_review": "concept",
+    "module_prompt_generation": "decompose",
+    "module_layout_repair": "decompose",
+    "module_reference_generation": "module_reference",
+    "module_reference_review": "module_reference",
+    "module_image_to_3d": "module_3d",
+    "module_mesh_sanity": "module_check",
+    "module_assets_index": "module_reference",
+    "scene_layout_agent": "layout",
+    "scene_assembler": "scene_preview",
+    "camera_candidate_search": "camera",
+    "render_white_channels": "render",
+    "white_model_position_contract": "agent",
+    "final_image2_render": "agent",
+    "ai_candidate_search": "agent",
+    "module_presence_scoring": "score",
+    "concept_final_comparison": "package",
+    "white_model_position_lock": "package",
+    "final_position_retry_plan": "package",
+    "image2_flow_audit": "package",
+}
+
 AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "scene_planner", "purpose": "use the configured DashScope multimodal model from .env as the Auto Scene brain"},
     {"name": "concept_image_generation", "purpose": "generate a global concept image from the model-expanded concept prompt"},
@@ -65,14 +150,19 @@ AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "module_reference_review", "purpose": "return generated module images to the multimodal model and revise failed prompts"},
     {"name": "module_image_to_3d", "purpose": "generate module GLB assets from reviewed reference images, falling back only when configured"},
     {"name": "module_mesh_sanity", "purpose": "check each module asset and apply failure policy"},
+    {"name": "module_assets_index", "purpose": "write a direct per-module reference image and GLB index for UI, API, and report inspection"},
     {"name": "scene_layout_agent", "purpose": "compute module scale, position, rotation, and layout reasons"},
     {"name": "scene_assembler", "purpose": "assemble module GLBs into a final scene GLB and preview"},
     {"name": "camera_candidate_search", "purpose": "render low-resolution RGB previews and select the best 3D scene camera before final channels"},
     {"name": "render_white_channels", "purpose": "render or mock scene rgb/edge/mask/depth/normal channels"},
+    {"name": "white_model_position_contract", "purpose": "derive normalized screen-space bbox/center/coverage contracts from Blender white-model render channels"},
     {"name": "final_image2_render", "purpose": "request Codex built-in image2 final rendering from white-model channels with position lock"},
     {"name": "ai_candidate_search", "purpose": "optionally run local final geometry-locked AI rendering from render_manifest channels"},
     {"name": "module_presence_scoring", "purpose": "score module presence and position adherence"},
     {"name": "concept_final_comparison", "purpose": "compare the final render against the global concept image and flag obvious quality failures"},
+    {"name": "white_model_position_lock", "purpose": "compare the final image against the Blender white-model hero view for screen-space layout drift"},
+    {"name": "final_position_retry_plan", "purpose": "write a Codex image2 retry handoff when the final image drifts from the white-model position contract"},
+    {"name": "image2_flow_audit", "purpose": "audit that real Auto Scene runs used model planning, Codex image2 handoff, model review, and reviewed-reference 3D AI"},
     {"name": "package_scene_outputs", "purpose": "write final manifests, report, contact sheet, and summary"},
 ]
 
@@ -694,6 +784,10 @@ def _module_identity_text(module: dict[str, Any]) -> str:
     return " ".join(str(module.get(key, "")) for key in ("module_id", "name", "category", "role", "reference_prompt")).lower()
 
 
+def _module_structural_identity_text(module: dict[str, Any]) -> str:
+    return " ".join(str(module.get(key, "")) for key in ("module_id", "name", "category", "role")).lower()
+
+
 def _is_mechanical_arm_module(module: dict[str, Any]) -> bool:
     text = _module_identity_text(module)
     return ("robotic" in text or "机械臂" in text or "industrial arm" in text or "robot arm" in text) and "arm" in text
@@ -710,6 +804,33 @@ def _is_screen_module(module: dict[str, Any]) -> bool:
     text = _module_identity_text(module)
     screen_terms = ("screen", "monitor", "display panel", "digital display", "led panel", "luminous panel", "屏幕", "显示屏")
     return any(term in text for term in screen_terms)
+
+
+def _is_flat_panel_module(module: dict[str, Any]) -> bool:
+    text = _module_identity_text(module)
+    panel_terms = ("panel", "wall slab", "backdrop", "partition", "display surface", "背景板", "墙板", "隔断")
+    horizontal_terms = ("floor", "ground", "floor panel", "地面", "地板")
+    return any(term in text for term in panel_terms) and not _is_platform_module(module) and not any(term in text for term in horizontal_terms)
+
+
+def _is_semantic_platform_module(module: dict[str, Any]) -> bool:
+    text = _module_structural_identity_text(module)
+    platform_terms = ("platform", "plinth", "pedestal", "stage base", "display base", "support surface", "展示台", "台座", "底座")
+    screen_terms = ("screen", "monitor", "display panel", "led panel", "屏幕", "显示屏")
+    return any(term in text for term in platform_terms) and not any(term in text for term in screen_terms)
+
+
+def _is_semantic_screen_module(module: dict[str, Any]) -> bool:
+    text = _module_structural_identity_text(module)
+    screen_terms = ("screen", "monitor", "display panel", "digital display", "led panel", "luminous panel", "屏幕", "显示屏")
+    return any(term in text for term in screen_terms)
+
+
+def _is_semantic_flat_panel_module(module: dict[str, Any]) -> bool:
+    text = _module_structural_identity_text(module)
+    panel_terms = ("panel", "wall slab", "backdrop", "partition", "display surface", "背景板", "墙板", "隔断")
+    horizontal_terms = ("floor", "ground", "floor panel", "地面", "地板")
+    return any(term in text for term in panel_terms) and not _is_semantic_platform_module(module) and not any(term in text for term in horizontal_terms)
 
 
 def _is_vertical_screen_module(module: dict[str, Any]) -> bool:
@@ -1195,6 +1316,19 @@ def _write_codex_image2_handoff(
                 if isinstance(image, dict):
                     lines.append(f"- `{image.get('role', '')}`: `{image.get('path', '')}`")
             lines.append("")
+        contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else {}
+        if contract:
+            lines.extend(
+                [
+                    "White-model position contract:",
+                    "",
+                    f"- Reference bbox: `{contract.get('bbox_norm', [])}`",
+                    f"- Reference center: `{contract.get('center_norm', [])}`",
+                    f"- Reference coverage: `{contract.get('coverage_ratio', '')}`",
+                    f"- Contract source: `{contract.get('source_rgb', '')}`",
+                    "",
+                ]
+            )
         lines.extend(
             [
                 "Prompt:",
@@ -2147,6 +2281,92 @@ def audit_auto_scene_image2_flow(
         reason="Reviewed module references must be handed to the configured 3D AI generator without procedural fallback.",
     )
 
+    final_request_path = workdir / "final" / "codex_image2_final_request.json"
+    final_request = _read_manifest_or_empty(final_request_path)
+    if final_request:
+        final_items = [item for item in final_request.get("requests", []) if isinstance(item, dict)]
+        channel_allowlist = {"rgb", "edge", "depth", "normal", "mask", "skeleton"}
+        final_evidence: list[dict[str, Any]] = []
+        all_white_locked = bool(final_items)
+        all_render_channel_only = bool(final_items)
+        all_position_contracts_present = bool(final_items)
+        for item in final_items:
+            inputs = [entry for entry in item.get("input_images", []) if isinstance(entry, dict)]
+            roles = {str(entry.get("role") or "") for entry in inputs}
+            channels = {str(entry.get("channel") or "") for entry in inputs}
+            paths = [str(entry.get("path") or "") for entry in inputs]
+            contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else {}
+            contract_ok = (
+                str(contract.get("status") or "") == "pass"
+                and isinstance(contract.get("bbox_norm"), list)
+                and len(contract.get("bbox_norm", [])) == 4
+                and isinstance(contract.get("center_norm"), list)
+                and len(contract.get("center_norm", [])) == 2
+            )
+            white_locked = "white_model_rgb_position_lock" in roles and "edge_silhouette_lock" in roles
+            render_channel_only = bool(inputs) and all(channel in channel_allowlist for channel in channels) and "appearance_style_reference_only" not in roles
+            all_white_locked = all_white_locked and white_locked
+            all_render_channel_only = all_render_channel_only and render_channel_only
+            all_position_contracts_present = all_position_contracts_present and contract_ok
+            final_evidence.append(
+                {
+                    "view_id": item.get("view_id", ""),
+                    "roles": sorted(roles),
+                    "channels": sorted(channels),
+                    "input_paths": paths,
+                    "white_locked": white_locked,
+                    "render_channel_only": render_channel_only,
+                    "position_contract": {
+                        "status": contract.get("status", ""),
+                        "bbox_norm": contract.get("bbox_norm", []),
+                        "center_norm": contract.get("center_norm", []),
+                        "pass": contract_ok,
+                    },
+                }
+            )
+        excluded = [str(value) for value in final_request.get("planning_images_excluded_from_final_inputs", [])]
+        concept_abs = _absolute_artifact_path(concept_image_path)
+        planning_images_excluded = (not _valid_image(concept_image_path)) or concept_abs in excluded
+        _audit_check(
+            checks,
+            "final_image2_uses_white_model_channels",
+            all_white_locked,
+            evidence={"final_request": _absolute_artifact_path(final_request_path), "requests": final_evidence},
+            reason="Final Codex image2 rendering must use the white-model RGB and edge channels as position-lock inputs.",
+        )
+        _audit_check(
+            checks,
+            "final_image2_excludes_planning_images",
+            all_render_channel_only and planning_images_excluded and not _json_has_key(final_request, "negative_prompt"),
+            evidence={
+                "final_request": _absolute_artifact_path(final_request_path),
+                "planning_images_excluded_from_final_inputs": excluded,
+                "concept_image": concept_abs,
+                "requests": final_evidence,
+            },
+            reason="Final image2 inputs must remain render-channel-only; concept and module references stay planning assets unless an explicit concept-guided mode is added.",
+        )
+        _audit_check(
+            checks,
+            "final_image2_has_white_model_position_contract",
+            all_position_contracts_present and bool(final_request.get("white_model_position_contract")),
+            evidence={
+                "final_request": _absolute_artifact_path(final_request_path),
+                "white_model_position_contract": final_request.get("white_model_position_contract", ""),
+                "requests": final_evidence,
+            },
+            reason="Final image2 requests must include normalized bbox/center/coverage contracts derived from the Blender white-model channels.",
+        )
+    else:
+        _audit_check(
+            checks,
+            "final_image2_request_present",
+            False,
+            evidence={"final_request": _absolute_artifact_path(final_request_path)},
+            reason="Final image2 request is not present yet; this audit only proves the chain through reviewed module 3D assets.",
+            required=False,
+        )
+
     required_checks = [check for check in checks if check["required"]]
     passed_count = sum(1 for check in required_checks if check["status"] == "pass")
     report = {
@@ -2840,7 +3060,15 @@ def _write_combined_mesh_glb(path: Path, vertices: list[tuple[float, float, floa
         fh.write(json_blob)
         fh.write(struct.pack("<I4s", len(bin_blob), b"BIN\x00"))
         fh.write(bin_blob)
-    return {"vertices": len(vertices), "faces": len(indices) // 3, "coordinate_export": "blender_z_up_to_gltf_y_up"}
+    bounds_min = [float(min(xs)), float(min(ys)), float(min(zs))]
+    bounds_max = [float(max(xs)), float(max(ys)), float(max(zs))]
+    return {
+        "vertices": len(vertices),
+        "faces": len(indices) // 3,
+        "coordinate_export": "blender_z_up_to_gltf_y_up",
+        "mesh_bounds": {"min": bounds_min, "max": bounds_max},
+        "mesh_extents": [round(bounds_max[index] - bounds_min[index], 6) for index in range(3)],
+    }
 
 
 def _load_trimesh_vertices_faces(path: str | Path) -> tuple[np.ndarray, np.ndarray] | None:
@@ -2857,6 +3085,21 @@ def _load_trimesh_vertices_faces(path: str | Path) -> tuple[np.ndarray, np.ndarr
         return np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64)
     except Exception:
         return None
+
+
+def _mesh_bounds_from_vertices(vertices: np.ndarray | None) -> dict[str, Any]:
+    if vertices is None or vertices.size == 0:
+        return {}
+    minimum = vertices.min(axis=0)
+    maximum = vertices.max(axis=0)
+    extents = np.maximum(maximum - minimum, 0.0)
+    return {
+        "mesh_bounds": {
+            "min": [round(float(value), 6) for value in minimum.tolist()],
+            "max": [round(float(value), 6) for value in maximum.tolist()],
+        },
+        "mesh_extents": [round(float(value), 6) for value in extents.tolist()],
+    }
 
 
 def _external_mesh_to_internal_points(points: np.ndarray, module_id: str, target_size: tuple[float, float, float]) -> tuple[np.ndarray, dict[str, Any]]:
@@ -3058,6 +3301,119 @@ def _module_size(module: dict[str, Any]) -> tuple[float, float, float]:
     )
 
 
+def _mesh_extents_from_stats_or_file(mesh_stats: dict[str, Any], model_path: Path) -> list[float]:
+    extents = mesh_stats.get("mesh_extents")
+    if isinstance(extents, (list, tuple)) and len(extents) == 3:
+        try:
+            return [float(value) for value in extents]
+        except (TypeError, ValueError):
+            pass
+    loaded = _load_trimesh_vertices_faces(model_path)
+    if loaded:
+        bounds = _mesh_bounds_from_vertices(loaded[0])
+        extents = bounds.get("mesh_extents", [])
+        if isinstance(extents, list) and len(extents) == 3:
+            return [float(value) for value in extents]
+    return []
+
+
+def _module_semantic_mesh_sanity(module: dict[str, Any], model_path: Path, mesh_stats: dict[str, Any]) -> dict[str, Any]:
+    semantic_profile = "generic"
+    if _is_semantic_platform_module(module):
+        semantic_profile = "low_horizontal_slab"
+    elif _is_semantic_screen_module(module) or _is_semantic_flat_panel_module(module):
+        semantic_profile = "flat_vertical_panel" if _is_vertical_screen_module(module) else "flat_panel"
+    if semantic_profile == "generic":
+        return {"status": "pass", "semantic_profile": semantic_profile, "checked": False, "flags": []}
+
+    extents = _mesh_extents_from_stats_or_file(mesh_stats, model_path)
+    if not extents or max(extents) <= 1e-6:
+        return {
+            "status": "needs_review",
+            "semantic_profile": semantic_profile,
+            "checked": True,
+            "mesh_extents": extents,
+            "flags": [
+                {
+                    "code": "mesh_bounds_unavailable",
+                    "severity": "review",
+                    "message": "Mesh bounds could not be read for semantic geometry validation.",
+                }
+            ],
+        }
+
+    sorted_extents = sorted((max(0.0, float(value)) for value in extents))
+    shortest, middle, longest = sorted_extents
+    thin_ratio = shortest / max(longest, 1e-6)
+    face_fill_ratio = middle / max(longest, 1e-6)
+    flags: list[dict[str, str]] = []
+
+    if semantic_profile == "low_horizontal_slab":
+        if thin_ratio > 0.30:
+            flags.append(
+                {
+                    "code": "platform_not_low_slab",
+                    "severity": "review",
+                    "message": "Platform-like modules should have one thin axis relative to the broad top plane.",
+                }
+            )
+        if face_fill_ratio < 0.42:
+            flags.append(
+                {
+                    "code": "platform_not_broad_enough",
+                    "severity": "review",
+                    "message": "Platform-like modules should keep two broad axes instead of degenerating into a narrow block.",
+                }
+            )
+    else:
+        if thin_ratio > 0.28:
+            flags.append(
+                {
+                    "code": "panel_or_screen_too_thick",
+                    "severity": "review",
+                    "message": "Screen or panel modules should preserve a thin slab axis for reliable scene assembly.",
+                }
+            )
+        if face_fill_ratio < 0.35:
+            flags.append(
+                {
+                    "code": "panel_face_too_narrow",
+                    "severity": "review",
+                    "message": "Screen or panel modules should retain a usable front face instead of becoming a strip or rod.",
+                }
+            )
+        if semantic_profile == "flat_vertical_panel" and longest / max(middle, 1e-6) < 1.12:
+            flags.append(
+                {
+                    "code": "vertical_panel_not_portrait",
+                    "severity": "review",
+                    "message": "Portrait/vertical panel modules should have a taller major axis than their width.",
+                }
+            )
+
+    return {
+        "status": "needs_review" if flags else "pass",
+        "semantic_profile": semantic_profile,
+        "checked": True,
+        "mesh_extents": [round(float(value), 6) for value in extents],
+        "extent_order": [round(float(value), 6) for value in sorted_extents],
+        "ratios": {
+            "thin_to_long": round(float(thin_ratio), 6),
+            "middle_to_long": round(float(face_fill_ratio), 6),
+        },
+        "flags": flags,
+    }
+
+
+def _merge_mesh_sanity_status(*statuses: str) -> str:
+    normalized = [str(status or "").lower() for status in statuses]
+    if any(status in {"fail", "failed", "error"} for status in normalized):
+        return "failed"
+    if any(status in {"needs_review", "review", "warning"} for status in normalized):
+        return "needs_review"
+    return "pass"
+
+
 def _hunyuan_enabled(config: dict[str, Any] | None, options: AutoSceneOptions | None) -> bool:
     if config is None or options is None or options.dry_run or options.backend == "mock":
         return False
@@ -3106,10 +3462,12 @@ def _generate_module_hunyuan_asset(
     loaded = _load_trimesh_vertices_faces(model_path)
     hunyuan_metadata = read_manifest(metadata_path) if metadata_path.exists() else {}
     hunyuan_mesh_sanity = hunyuan_metadata.get("mesh_sanity", {}) if isinstance(hunyuan_metadata, dict) else {}
+    bounds = _mesh_bounds_from_vertices(loaded[0] if loaded else None)
     return {
         "vertices": int(len(loaded[0])) if loaded else 0,
         "faces": int(len(loaded[1])) if loaded else 0,
         "coordinate_export": "hunyuan3d_generated_from_reviewed_reference",
+        **bounds,
         "source_reference_image": _absolute_artifact_path(reference),
         "hunyuan_metadata": _absolute_artifact_path(metadata_path),
         "hunyuan_mesh_sanity": hunyuan_mesh_sanity,
@@ -3134,6 +3492,7 @@ def generate_module_assets(
     hunyuan_enabled = _hunyuan_enabled(config, options)
     hunyuan_profile_name, hunyuan_shape_overrides = _hunyuan_shape_profile(config or {}, options)
     failed_modules: list[dict[str, Any]] = []
+    quality_issues: list[dict[str, Any]] = []
     for module in module_plan.get("modules", []):
         module_id = str(module["module_id"])
         module_dir = workdir / "modules" / module_id
@@ -3149,10 +3508,12 @@ def generate_module_assets(
             model_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(external_source, model_path)
             loaded = _load_trimesh_vertices_faces(model_path)
+            bounds = _mesh_bounds_from_vertices(loaded[0] if loaded else None)
             mesh_stats = {
                 "vertices": int(len(loaded[0])) if loaded else 0,
                 "faces": int(len(loaded[1])) if loaded else 0,
                 "coordinate_export": "external_glb_preserved_for_scene_assembly",
+                **bounds,
                 "source_model_path": _absolute_artifact_path(external_source),
             }
             generator_id = "external_hero_model_glb"
@@ -3183,16 +3544,33 @@ def generate_module_assets(
                 mesh_stats = write_module_proxy_glb(model_path, module)
                 generator_id = "procedural_module_proxy_v3_axis_corrected"
                 fallback_used = bool(generation_failure)
+        semantic_sanity = _module_semantic_mesh_sanity(module, model_path, mesh_stats)
+        sanity_status = _merge_mesh_sanity_status(str(mesh_stats.get("hunyuan_status") or "pass"), str(semantic_sanity.get("status") or "pass"))
+        if semantic_sanity.get("flags"):
+            quality_issues.append(
+                {
+                    "module_id": module_id,
+                    "status": semantic_sanity.get("status", "needs_review"),
+                    "action": "review_or_regenerate_module_3d",
+                    "semantic_profile": semantic_sanity.get("semantic_profile", ""),
+                    "flags": semantic_sanity.get("flags", []),
+                }
+            )
         sanity = {
             "vertices": mesh_stats["vertices"],
             "faces": mesh_stats["faces"],
             "component_count": 1,
             "largest_component_ratio": 1.0,
-            "status": str(mesh_stats.get("hunyuan_status") or "pass"),
+            "status": sanity_status,
             "fallback_used": fallback_used,
             "proxy_geometry": generator_id,
             "coordinate_export": mesh_stats.get("coordinate_export", ""),
+            "semantic_mesh_sanity": semantic_sanity,
         }
+        if mesh_stats.get("mesh_bounds"):
+            sanity["mesh_bounds"] = mesh_stats["mesh_bounds"]
+        if mesh_stats.get("mesh_extents"):
+            sanity["mesh_extents"] = mesh_stats["mesh_extents"]
         if generation_failure:
             sanity["generation_failure"] = generation_failure
         if mesh_stats.get("source_model_path"):
@@ -3243,6 +3621,8 @@ def generate_module_assets(
         "allow_procedural_fallback": allow_fallback,
         "module_3d_backend": "hunyuan3d_2_1_shape" if hunyuan_enabled else "procedural_or_external",
         "failed_modules": failed_modules,
+        "quality_issues": quality_issues,
+        "status": "needs_review" if failed_modules or quality_issues else "pass",
     }
 
 
@@ -3637,7 +4017,75 @@ def _camera_candidate_states(camera_plan: dict[str, Any], views: int) -> list[di
     return candidates
 
 
-def _score_camera_preview_image(path: str | Path) -> dict[str, Any]:
+def _extract_concept_camera_target(path: str | Path | None) -> dict[str, Any]:
+    if not path or not Path(path).exists():
+        return {"status": "missing", "source": str(path or "")}
+    try:
+        image = Image.open(path).convert("RGB")
+    except Exception as exc:
+        return {"status": "failed", "source": str(path), "error": str(exc)}
+    image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    rgb = np.asarray(image, dtype=np.float32) / 255.0
+    height, width, _channels = rgb.shape
+    if height < 16 or width < 16:
+        return {"status": "failed", "source": str(path), "error": "image_too_small"}
+
+    gray = rgb.mean(axis=2)
+    gx = np.zeros_like(gray)
+    gy = np.zeros_like(gray)
+    gx[:, 1:] = np.abs(gray[:, 1:] - gray[:, :-1])
+    gy[1:, :] = np.abs(gray[1:, :] - gray[:-1, :])
+    edges = np.maximum(gx, gy)
+    border = max(4, min(height, width) // 18)
+    border_pixels = np.concatenate(
+        [
+            rgb[:border, :, :].reshape(-1, 3),
+            rgb[-border:, :, :].reshape(-1, 3),
+            rgb[:, :border, :].reshape(-1, 3),
+            rgb[:, -border:, :].reshape(-1, 3),
+        ],
+        axis=0,
+    )
+    background = np.median(border_pixels, axis=0)
+    color_delta = np.mean(np.abs(rgb - background), axis=2)
+    delta_threshold = max(0.075, float(np.percentile(color_delta, 70)) * 0.75)
+    edge_threshold = max(0.035, float(np.percentile(edges, 82)) * 0.65)
+    mask = (color_delta > delta_threshold) | (edges > edge_threshold)
+    margin = max(2, min(height, width) // 80)
+    mask[:margin, :] = False
+    mask[-margin:, :] = False
+    mask[:, :margin] = False
+    mask[:, -margin:] = False
+    ys, xs = np.nonzero(mask)
+    if len(xs) < max(32, int(width * height * 0.004)):
+        return {
+            "status": "insufficient_foreground",
+            "source": str(path),
+            "foreground_ratio": round(float(mask.mean()), 6),
+            "method": "border_delta_edge_mask_v1",
+        }
+
+    left = float(xs.min() / width)
+    right = float((xs.max() + 1) / width)
+    top = float(ys.min() / height)
+    bottom = float((ys.max() + 1) / height)
+    center_x = float((left + right) * 0.5)
+    center_y = float((top + bottom) * 0.5)
+    scene_area = float(mask.mean())
+    return {
+        "status": "pass",
+        "source": str(Path(path).resolve()),
+        "method": "border_delta_edge_mask_v1",
+        "center": [round(center_x, 4), round(center_y, 4)],
+        "bbox": [round(left, 4), round(top, 4), round(right, 4), round(bottom, 4)],
+        "scene_top": round(top, 6),
+        "scene_bottom": round(bottom, 6),
+        "scene_area": round(scene_area, 6),
+        "foreground_ratio": round(scene_area, 6),
+    }
+
+
+def _score_camera_preview_image(path: str | Path, *, concept_target: Mapping[str, Any] | None = None) -> dict[str, Any]:
     image = Image.open(path).convert("L")
     gray = np.asarray(image, dtype=np.float32) / 255.0
     height, width = gray.shape
@@ -3662,6 +4110,16 @@ def _score_camera_preview_image(path: str | Path) -> dict[str, Any]:
     hero_bright_ratio = float((hero_gray > 0.56).mean()) if hero_gray.size else 0.0
     hero_subject_score = max(0.0, 1.0 - abs(hero_bright_ratio - 0.60) / 0.60)
 
+    concept_target = concept_target or {}
+    concept_center = concept_target.get("center", [0.52, 0.58])
+    if not isinstance(concept_center, (list, tuple)) or len(concept_center) != 2:
+        concept_center = [0.52, 0.58]
+    target_center_x = float(concept_center[0]) if str(concept_target.get("status", "")).lower() == "pass" else 0.52
+    target_center_y = float(concept_center[1]) if str(concept_target.get("status", "")).lower() == "pass" else 0.58
+    target_scene_top = float(concept_target.get("scene_top", 0.22)) if str(concept_target.get("status", "")).lower() == "pass" else 0.22
+    target_scene_area = float(concept_target.get("scene_area", 0.38)) if str(concept_target.get("status", "")).lower() == "pass" else 0.38
+    target_scene_area = min(0.64, max(0.08, target_scene_area))
+
     ys, xs = np.nonzero(wide_edges > 0.045)
     if len(xs):
         center_x = float((xs.mean() + wide_left) / width)
@@ -3685,6 +4143,9 @@ def _score_camera_preview_image(path: str | Path) -> dict[str, Any]:
         scene_area = 0.0
     upper_frame_score = max(0.0, 1.0 - abs(scene_top - 0.22) * 3.0)
     coverage_score = max(0.0, 1.0 - abs(scene_area - 0.38) / 0.38)
+    concept_center_score = max(0.0, 1.0 - abs(center_x - target_center_x) * 2.2 - abs(center_y - target_center_y) * 1.8)
+    concept_top_score = max(0.0, 1.0 - abs(scene_top - target_scene_top) * 3.0)
+    concept_area_score = max(0.0, 1.0 - abs(scene_area - target_scene_area) / max(0.08, target_scene_area))
     side_width = max(1, int(width * 0.02))
     side_clip = float((bright[:, :side_width].mean() + bright[:, -side_width:].mean()) * 0.5)
     bottom_floor = float(bright[int(height * 0.84) :, :].mean())
@@ -3699,6 +4160,9 @@ def _score_camera_preview_image(path: str | Path) -> dict[str, Any]:
         + vertical_score * 0.8
         + upper_frame_score * 1.6
         + coverage_score * 0.8
+        + concept_center_score * 1.4
+        + concept_top_score * 0.7
+        + concept_area_score * 0.6
         - side_clip * 0.12
         - bottom_floor * 0.08
         - top_empty * 0.16
@@ -3718,6 +4182,13 @@ def _score_camera_preview_image(path: str | Path) -> dict[str, Any]:
         "scene_area": round(scene_area, 6),
         "upper_frame_score": round(upper_frame_score, 6),
         "coverage_score": round(coverage_score, 6),
+        "concept_target_status": str(concept_target.get("status", "not_used")),
+        "concept_target_center": [round(target_center_x, 4), round(target_center_y, 4)],
+        "concept_target_scene_top": round(target_scene_top, 6),
+        "concept_target_scene_area": round(target_scene_area, 6),
+        "concept_center_score": round(concept_center_score, 6),
+        "concept_top_score": round(concept_top_score, 6),
+        "concept_area_score": round(concept_area_score, 6),
         "side_clip": round(side_clip, 6),
         "bottom_floor": round(bottom_floor, 6),
         "top_empty": round(top_empty, 6),
@@ -3762,10 +4233,12 @@ def select_scene_camera(
     config: dict[str, Any],
     render_backend: str,
     dry_run: bool,
+    concept_image: str | Path | None = None,
 ) -> dict[str, Any]:
     cameras_dir = workdir / "cameras"
     cameras_dir.mkdir(parents=True, exist_ok=True)
     original_plan = copy.deepcopy(camera_plan)
+    concept_target = _extract_concept_camera_target(concept_image)
     if dry_run or str(render_backend).lower() == "procedural":
         report = {
             "type": "camera_search_report",
@@ -3773,6 +4246,7 @@ def select_scene_camera(
             "reason": "procedural_or_dry_run_backend",
             "selected_camera": _blender_camera_state(camera_plan, views),
             "candidate_count": 0,
+            "concept_camera_target": concept_target,
         }
         report_path = write_manifest(cameras_dir / "camera_search_report.json", report)
         return {"camera_plan": camera_plan, "report_path": str(report_path), "contact_sheet": ""}
@@ -3785,6 +4259,7 @@ def select_scene_camera(
             "reason": "no_camera_candidates",
             "selected_camera": _blender_camera_state(camera_plan, views),
             "candidate_count": 0,
+            "concept_camera_target": concept_target,
         }
         report_path = write_manifest(cameras_dir / "camera_search_report.json", report)
         return {"camera_plan": camera_plan, "report_path": str(report_path), "contact_sheet": ""}
@@ -3798,6 +4273,7 @@ def select_scene_camera(
             "reason": "blender_not_found",
             "selected_camera": _blender_camera_state(camera_plan, views),
             "candidate_count": len(candidates),
+            "concept_camera_target": concept_target,
         }
         report_path = write_manifest(cameras_dir / "camera_search_report.json", report)
         return {"camera_plan": camera_plan, "report_path": str(report_path), "contact_sheet": ""}
@@ -3842,6 +4318,7 @@ def select_scene_camera(
             "reason": str(exc),
             "selected_camera": _blender_camera_state(camera_plan, views),
             "candidate_count": len(candidates),
+            "concept_camera_target": concept_target,
         }
         report_path = write_manifest(cameras_dir / "camera_search_report.json", report)
         return {"camera_plan": camera_plan, "report_path": str(report_path), "contact_sheet": ""}
@@ -3849,7 +4326,7 @@ def select_scene_camera(
     scored: list[dict[str, Any]] = []
     for view in preview_manifest.get("views", []):
         rgb_path = str(dict(view.get("files", {})).get("rgb", ""))
-        metrics = _score_camera_preview_image(rgb_path) if rgb_path and Path(rgb_path).exists() else {"score": -999.0}
+        metrics = _score_camera_preview_image(rgb_path, concept_target=concept_target) if rgb_path and Path(rgb_path).exists() else {"score": -999.0}
         scored.append({**view, "metrics": metrics})
     selected = max(scored, key=lambda item: float(dict(item.get("metrics", {})).get("score", -999.0))) if scored else {"camera": _blender_camera_state(camera_plan, views), "view_id": "view_hero"}
     selected_camera = copy.deepcopy(dict(selected.get("camera", {})))
@@ -3881,11 +4358,12 @@ def select_scene_camera(
     report = {
         "type": "camera_search_report",
         "status": "pass",
-        "method": "blender_rgb_preview_cv_score_v1",
+        "method": "blender_rgb_preview_cv_score_v2_concept_aligned" if concept_target.get("status") == "pass" else "blender_rgb_preview_cv_score_v1",
         "preview_manifest": str(preview_dir / "manifest.json"),
         "selected_preview_view_id": str(selected.get("view_id", "")),
         "selected_camera": selected_camera,
         "candidate_count": len(scored),
+        "concept_camera_target": concept_target,
         "candidates": [
             {
                 "view_id": str(item.get("view_id", "")),
@@ -3898,6 +4376,7 @@ def select_scene_camera(
         "contact_sheet": contact_sheet,
         "notes": [
             "Camera selection is based on rendered 3D white-model RGB previews.",
+            "When a concept image target is available, candidate scores include composition center, top boundary, and coverage alignment to that concept target.",
             "The selected camera is used for the final render_manifest channels before AI rendering.",
         ],
     }
@@ -4037,19 +4516,14 @@ def _codex_image2_final_prompt(base_prompt: str, *, view_id: str) -> str:
     prompt = " ".join(str(base_prompt or "").split())
     geometry_lock = (
         "Use the white-model RGB reference as the exact geometry, camera, composition, module position, scale, and silhouette lock. "
-        "Keep the hero car, platform, robot arm, vertical panel, thin right-side structure, and every visible module at the same screen-space position and scale. "
-        "Render materials, lighting, color, blue glow, screen illumination, floor reflection, and commercial polish over that fixed white-model layout. "
-        "Use only the visible white-model modules as the scene structure. Preserve the same crop, perspective, foreground/background order, and object overlaps. "
-        "The white electric hypercar remains bright, clear, unobstructed, and visually dominant."
-    )
-    style = (
-        "Style target: premium futuristic automotive launch booth, glossy white electric hypercar, matte black platform with electric blue edge light strips, "
-        "cool gray exhibition hall, reflective polished floor, tall blank abstract blue luminous display panels, high-end photorealistic 3D product render, "
-        "physically based materials, crisp ray-traced reflections, clean professional lighting."
+        "Treat the edge, mask, depth, normal, and skeleton channels as supporting layout evidence. "
+        "Preserve the same crop, perspective, foreground/background order, object overlaps, screen-space module positions, and relative object scale. "
+        "Render materials, lighting, color, surface finish, reflections, and production polish over the fixed white-model structure. "
+        "The output scene structure is exactly the visible assembled 3D scene from the reference channels, with the main subject clear and visually dominant."
     )
     if prompt:
-        return f"{prompt}\n\n{geometry_lock}\n\n{style}\n\nView id: {view_id}."
-    return f"{geometry_lock}\n\n{style}\n\nView id: {view_id}."
+        return f"{prompt}\n\n{geometry_lock}\n\nView id: {view_id}."
+    return f"{geometry_lock}\n\nView id: {view_id}."
 
 
 def _render_view_requests(render_manifest_path: str | Path, *, max_views: int) -> list[dict[str, Any]]:
@@ -4075,7 +4549,7 @@ def _render_view_requests(render_manifest_path: str | Path, *, max_views: int) -
     return output
 
 
-def _final_image_reference_inputs(view: dict[str, Any], concept_image: str | Path | None) -> list[dict[str, str]]:
+def _final_image_reference_inputs(view: dict[str, Any]) -> list[dict[str, str]]:
     files = dict(view.get("files", {}))
     roles = [
         ("white_model_rgb_position_lock", "rgb"),
@@ -4090,9 +4564,143 @@ def _final_image_reference_inputs(view: dict[str, Any], concept_image: str | Pat
         path = files.get(channel)
         if path and Path(path).exists():
             inputs.append({"role": role, "path": _absolute_artifact_path(path), "channel": channel})
-    if concept_image and Path(concept_image).exists():
-        inputs.append({"role": "appearance_style_reference_only", "path": _absolute_artifact_path(concept_image), "channel": "concept"})
     return inputs
+
+
+def _position_contract_for_render_view(view: dict[str, Any]) -> dict[str, Any]:
+    view_id = str(view.get("view_id") or "")
+    files = dict(view.get("files", {}))
+    rgb = str(files.get("rgb") or "")
+    mask_path = str(files.get("mask") or "")
+    edge_path = str(files.get("edge") or "")
+    if not rgb or not Path(rgb).exists():
+        return {
+            "view_id": view_id,
+            "status": "missing_rgb",
+            "source_rgb": _absolute_artifact_path(rgb),
+            "bbox_norm": [],
+            "center_norm": [],
+            "coverage_ratio": 0.0,
+        }
+    size = (512, 512)
+    mask = _mask_from_channel(mask_path, size=size) if mask_path and Path(mask_path).exists() else _foreground_mask_from_rgb(rgb, size=size)
+    if not mask.any():
+        mask = _foreground_mask_from_rgb(rgb, size=size)
+    bbox = _binary_bbox(mask)
+    if not bbox:
+        return {
+            "view_id": view_id,
+            "status": "missing_foreground",
+            "source_rgb": _absolute_artifact_path(rgb),
+            "source_mask": _absolute_artifact_path(mask_path),
+            "source_edge": _absolute_artifact_path(edge_path),
+            "bbox_norm": [],
+            "center_norm": [],
+            "coverage_ratio": round(float(mask.mean()), 6),
+        }
+    x0, y0, x1, y1 = bbox
+    width = max(1e-6, x1 - x0)
+    height = max(1e-6, y1 - y0)
+    return {
+        "view_id": view_id,
+        "status": "pass",
+        "source_rgb": _absolute_artifact_path(rgb),
+        "source_mask": _absolute_artifact_path(mask_path),
+        "source_edge": _absolute_artifact_path(edge_path),
+        "bbox_norm": [round(float(value), 6) for value in bbox],
+        "center_norm": [round(float((x0 + x1) * 0.5), 6), round(float((y0 + y1) * 0.5), 6)],
+        "size_norm": [round(float(width), 6), round(float(height), 6)],
+        "coverage_ratio": round(float(mask.mean()), 6),
+        "aspect_ratio": round(float(width / max(height, 1e-6)), 6),
+        "rules": [
+            "Preserve this normalized foreground bbox, center, coverage, crop, camera, silhouette, and module ordering.",
+            "Apply production materials, lighting, reflections, color, and surface finish over the fixed white-model structure.",
+            "Use the listed render channels as the only final-render image inputs.",
+        ],
+    }
+
+
+def _write_position_contract_overlay(contracts: list[dict[str, Any]], output_image: str | Path) -> str:
+    output = Path(output_image)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    valid = [item for item in contracts if item.get("source_rgb") and Path(str(item["source_rgb"])).exists()]
+    panel_size = (360, 360)
+    label_h = 34
+    if not valid:
+        Image.new("RGB", panel_size, (240, 240, 240)).save(output)
+        return str(output)
+    columns = min(3, len(valid))
+    rows = math.ceil(len(valid) / columns)
+    sheet = Image.new("RGB", (columns * panel_size[0], rows * (panel_size[1] + label_h)), (255, 255, 255))
+    draw = ImageDraw.Draw(sheet)
+    for index, item in enumerate(valid):
+        col = index % columns
+        row = index // columns
+        x = col * panel_size[0]
+        y = row * (panel_size[1] + label_h)
+        image = Image.open(str(item["source_rgb"])).convert("RGB").resize(panel_size, Image.Resampling.LANCZOS)
+        panel_draw = ImageDraw.Draw(image)
+        bbox = item.get("bbox_norm") if isinstance(item.get("bbox_norm"), list) else []
+        if len(bbox) == 4:
+            x0, y0, x1, y1 = [float(value) for value in bbox]
+            panel_draw.rectangle(
+                [int(x0 * panel_size[0]), int(y0 * panel_size[1]), int(x1 * panel_size[0]), int(y1 * panel_size[1])],
+                outline=(54, 132, 245),
+                width=4,
+            )
+        sheet.paste(image, (x, y + label_h))
+        draw.rectangle([x, y, x + panel_size[0] - 1, y + label_h - 1], fill=(28, 31, 36))
+        draw.text((x + 10, y + 10), str(item.get("view_id") or f"view_{index}"), fill=(242, 244, 247))
+    sheet.save(output)
+    return str(output)
+
+
+def create_white_model_position_contract(
+    *,
+    render_manifest: str | Path,
+    output_report: str | Path,
+    output_image: str | Path,
+    output_views: int,
+) -> dict[str, Any]:
+    views = _render_view_requests(render_manifest, max_views=min(3, int(output_views or 1)))
+    contracts = [_position_contract_for_render_view(view) for view in views]
+    overlay = _write_position_contract_overlay(contracts, output_image)
+    status = "pass" if contracts and all(item.get("status") == "pass" for item in contracts) else "needs_review"
+    report = {
+        "type": "white_model_position_contract",
+        "status": status,
+        "render_manifest": _absolute_artifact_path(render_manifest),
+        "contract_count": len(contracts),
+        "contracts": contracts,
+        "overlay_image": _absolute_artifact_path(overlay),
+        "policy": "final_image2_must_preserve_white_model_screen_space_contract",
+    }
+    write_manifest(output_report, report)
+    return report
+
+
+def _position_contract_by_view(position_contract_path: str | Path | None) -> dict[str, dict[str, Any]]:
+    if not position_contract_path or not Path(position_contract_path).exists():
+        return {}
+    contract = read_manifest(position_contract_path)
+    output: dict[str, dict[str, Any]] = {}
+    for item in contract.get("contracts", []):
+        if isinstance(item, dict) and item.get("view_id"):
+            output[str(item["view_id"])] = item
+    return output
+
+
+def _position_contract_prompt_clause(contract: dict[str, Any]) -> str:
+    if not contract:
+        return ""
+    bbox = contract.get("bbox_norm", [])
+    center = contract.get("center_norm", [])
+    coverage = contract.get("coverage_ratio", "")
+    return (
+        "White-model position contract: preserve normalized foreground bbox "
+        f"{bbox}, center {center}, and coverage {coverage}. "
+        "Keep every visible module anchored to this same screen-space structure."
+    )
 
 
 def _write_codex_image2_final_request(
@@ -4102,16 +4710,25 @@ def _write_codex_image2_final_request(
     prompt_plan: dict[str, Any],
     concept_image: str | Path | None,
     output_views: int,
+    position_contract_path: str | Path | None = None,
 ) -> Path:
     final_dir = workdir / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
     views = _render_view_requests(render_manifest_path, max_views=min(3, int(output_views or 1)))
     requests: list[dict[str, Any]] = []
+    excluded_planning_images = []
+    contracts_by_view = _position_contract_by_view(position_contract_path)
+    if concept_image and Path(concept_image).exists():
+        excluded_planning_images.append(_absolute_artifact_path(concept_image))
     for index, view in enumerate(views):
         source_view_id = str(view.get("view_id") or f"view_{index:02d}")
         canonical_view_id = "view_hero" if source_view_id == "view_locked" and index == 0 else source_view_id
         output_path = final_dir / _final_output_filename(canonical_view_id)
+        contract = contracts_by_view.get(canonical_view_id) or contracts_by_view.get(source_view_id) or {}
         prompt = _codex_image2_final_prompt(str(prompt_plan.get("render_prompt") or ""), view_id=canonical_view_id)
+        contract_clause = _position_contract_prompt_clause(contract)
+        if contract_clause:
+            prompt = f"{prompt}\n\n{contract_clause}"
         requests.append(
             {
                 "view_id": canonical_view_id,
@@ -4120,11 +4737,17 @@ def _write_codex_image2_final_request(
                 "provider": "codex_builtin_image2",
                 "output_path": _absolute_artifact_path(output_path),
                 "prompt": prompt,
-                "input_images": _final_image_reference_inputs(view, concept_image),
+                "input_images": _final_image_reference_inputs(view),
+                "position_lock_contract": contract,
                 "position_lock": {
                     "primary_reference_role": "white_model_rgb_position_lock",
                     "policy": "same camera, same screen-space module positions, same object scale, same silhouette relationships",
-                    "style_reference_role": "appearance_style_reference_only",
+                    "style_source": "prompt_plan.render_prompt",
+                    "contract_source": _absolute_artifact_path(position_contract_path) if position_contract_path else "",
+                },
+                "style_policy": {
+                    "style_source": "prompt_plan.render_prompt",
+                    "planning_images_excluded_from_final_inputs": excluded_planning_images,
                 },
             }
         )
@@ -4141,8 +4764,10 @@ def _write_codex_image2_final_request(
         "provider": "codex_builtin_image2",
         "request_path": str(request_path.expanduser().resolve()),
         "codex_image2_handoff": str(handoff_path.expanduser().resolve()),
-        "reference_policy": "white_model_position_locked",
+        "reference_policy": "white_model_position_locked_render_channels_only",
         "render_manifest": _absolute_artifact_path(render_manifest_path),
+        "white_model_position_contract": _absolute_artifact_path(position_contract_path) if position_contract_path else "",
+        "planning_images_excluded_from_final_inputs": excluded_planning_images,
         "request_count": len(requests),
         "requests": requests,
         "output_paths": [item["output_path"] for item in requests],
@@ -4157,7 +4782,8 @@ def _write_codex_image2_final_request(
         ),
         "instruction": (
             "Use Codex built-in image2, not DashScope/Qwen image2 and not a local AI renderer. "
-            "For each request, provide the listed input images to image2; the white-model RGB is the position lock and the concept image is style-only. "
+            "For each request, provide only the listed render-channel input images to image2; the white-model RGB is the primary position lock. "
+            "Use prompt_plan.render_prompt for style and keep concept/module reference images out of final image inputs. "
             "Save each selected output exactly to output_path or import it with import_command/latest_import_command, then rerun the Auto Scene command."
         ),
     }
@@ -4187,6 +4813,105 @@ def _write_labeled_contact_sheet(items: list[tuple[str, str | Path]], output_pat
         draw.text((x + 12, 10), label[:48], fill=(242, 244, 247))
     sheet.save(output_path)
     return str(output_path)
+
+
+def create_white_channel_contact_sheet(
+    *,
+    render_manifest_path: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    hero = _render_hero_view(render_manifest_path) or {}
+    files = dict(hero.get("files", {}))
+    ordered_channels = ["rgb", "edge", "depth", "normal", "mask", "skeleton"]
+    channel_files = {
+        channel: _absolute_artifact_path(path)
+        for channel in ordered_channels
+        for path in [files.get(channel)]
+        if path and Path(str(path)).exists()
+    }
+    contact_sheet = _write_labeled_contact_sheet(
+        [(channel, path) for channel, path in channel_files.items()],
+        Path(output_path),
+        panel_size=(384, 384),
+    )
+    return {
+        "type": "white_channel_contact_sheet",
+        "status": "pass" if "rgb" in channel_files else "needs_review",
+        "render_manifest": _absolute_artifact_path(render_manifest_path),
+        "view_id": str(hero.get("view_id", "")),
+        "white_render": channel_files.get("rgb", ""),
+        "channels": channel_files,
+        "contact_sheet": _absolute_artifact_path(contact_sheet),
+    }
+
+
+def create_module_assets_index(
+    *,
+    workdir: Path,
+    module_plan: dict[str, Any],
+    asset_manifest: dict[str, Any],
+    output_report: str | Path,
+    output_contact_sheet: str | Path,
+) -> dict[str, Any]:
+    workdir = Path(workdir).expanduser().resolve()
+    assets_by_id = {
+        str(item.get("module_id") or ""): item
+        for item in asset_manifest.get("modules", [])
+        if isinstance(item, dict) and item.get("module_id")
+    }
+    modules: list[dict[str, Any]] = []
+    contact_items: list[tuple[str, str]] = []
+    for module in module_plan.get("modules", []):
+        if not isinstance(module, dict):
+            continue
+        module_id = str(module.get("module_id") or "")
+        if not module_id:
+            continue
+        module_dir = workdir / "modules" / module_id
+        reference_manifest_path = module_dir / "reference_manifest.json"
+        reference_manifest = _read_manifest_or_empty(reference_manifest_path)
+        asset = assets_by_id.get(module_id, {})
+        metadata_path = Path(str(asset.get("metadata") or module_dir / "metadata.json"))
+        sanity_path = module_dir / "sanity.json"
+        sanity = _read_manifest_or_empty(sanity_path)
+        reference_image = str(reference_manifest.get("reference_image") or asset.get("reference_image") or module_dir / "reference.png")
+        preprocessed_image = str(reference_manifest.get("preprocessed_image") or asset.get("preprocessed_image") or module_dir / "preprocessed.png")
+        model_path = str(asset.get("model_path") or module_dir / "model.glb")
+        if Path(reference_image).exists():
+            contact_items.append((module_id, reference_image))
+        modules.append(
+            {
+                "module_id": module_id,
+                "name": str(module.get("name") or ""),
+                "category": str(module.get("category") or ""),
+                "role": str(module.get("role") or asset.get("role") or ""),
+                "priority": int(module.get("priority", 99)),
+                "reference_image": _absolute_artifact_path(reference_image),
+                "reference_manifest": _absolute_artifact_path(reference_manifest_path),
+                "preprocessed_image": _absolute_artifact_path(preprocessed_image),
+                "model_path": _absolute_artifact_path(model_path),
+                "metadata": _absolute_artifact_path(metadata_path),
+                "sanity": _absolute_artifact_path(sanity_path),
+                "bbox": asset.get("bbox", {}),
+                "review_status": str(reference_manifest.get("review_status") or ""),
+                "image_source": str(reference_manifest.get("image_source") or ""),
+                "model_generator": str(_read_manifest_or_empty(metadata_path).get("created_by") or ""),
+                "fallback_used": bool(asset.get("fallback_used") or sanity.get("fallback_used")),
+                "reference_exists": _valid_image(Path(reference_image)),
+                "model_exists": _valid_model_artifact(Path(model_path)),
+            }
+        )
+    contact_sheet = _write_labeled_contact_sheet(contact_items, Path(output_contact_sheet), panel_size=(384, 384))
+    report = {
+        "type": "module_assets_index",
+        "status": "pass" if modules and all(item["reference_exists"] and item["model_exists"] for item in modules) else "needs_review",
+        "workdir": _absolute_artifact_path(workdir),
+        "module_count": len(modules),
+        "module_reference_contact_sheet": _absolute_artifact_path(contact_sheet),
+        "modules": modules,
+    }
+    write_manifest(Path(output_report), report)
+    return report
 
 
 def _collect_codex_image2_final_summary(
@@ -4291,13 +5016,24 @@ def generate_codex_image2_final_render(
     prompt_plan: dict[str, Any],
     concept_image: str | Path | None,
     output_views: int,
+    position_contract_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    if position_contract_path is None:
+        position_contract_path = workdir / "reports" / "white_model_position_contract.json"
+        if not Path(position_contract_path).exists():
+            create_white_model_position_contract(
+                render_manifest=render_manifest_path,
+                output_report=position_contract_path,
+                output_image=workdir / "final" / "white_position_contract_overlay.png",
+                output_views=output_views,
+            )
     request_path = _write_codex_image2_final_request(
         workdir=workdir,
         render_manifest_path=render_manifest_path,
         prompt_plan=prompt_plan,
         concept_image=concept_image,
         output_views=output_views,
+        position_contract_path=position_contract_path,
     )
     request = read_manifest(request_path)
     missing = [
@@ -4322,6 +5058,157 @@ def _absolute_artifact_path(value: Any) -> str:
     return str(Path(text).expanduser().resolve())
 
 
+def _latest_stage_messages(stage_events: list[dict[str, Any]] | None) -> dict[str, str]:
+    latest: dict[str, str] = {}
+    for event in stage_events or []:
+        stage_id = str(event.get("stage") or "")
+        message = str(event.get("message") or "")
+        if stage_id:
+            latest[stage_id] = message
+    return latest
+
+
+def _auto_scene_stage_artifacts(summary: dict[str, Any], stage_id: str) -> dict[str, str]:
+    artifacts: dict[str, str] = {}
+    summary_artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
+    for key in AUTO_SCENE_STAGE_ARTIFACT_KEYS.get(stage_id, ()):
+        value = summary.get(key) or summary_artifacts.get(key)
+        if isinstance(value, dict):
+            continue
+        if value:
+            artifacts[key] = _absolute_artifact_path(value)
+    return artifacts
+
+
+def _auto_scene_tool_stage_stats(tool_calls: list[dict[str, Any]] | None) -> tuple[dict[str, int], dict[str, str]]:
+    counts: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    for call in tool_calls or []:
+        stage_id = AUTO_SCENE_TOOL_STAGE_MAP.get(str(call.get("tool") or ""))
+        if not stage_id:
+            continue
+        counts[stage_id] = counts.get(stage_id, 0) + 1
+        if str(call.get("status") or "") == "failed":
+            errors[stage_id] = str(call.get("error") or "tool failed")
+    return counts, errors
+
+
+def _auto_scene_stage_warning_map(summary: dict[str, Any]) -> dict[str, list[str]]:
+    warnings: dict[str, list[str]] = {stage_id: [] for stage_id in AUTO_SCENE_STAGE_IDS}
+    capabilities = summary.get("capabilities") if isinstance(summary.get("capabilities"), dict) else {}
+    for stage_id, capability_key in (
+        ("concept", "concept_review"),
+        ("decompose", "module_layout_contract"),
+        ("module_reference", "module_reference_review"),
+        ("module_reference", "module_assets_index"),
+        ("module_check", "module_mesh_sanity"),
+        ("agent", "white_model_position_contract"),
+        ("package", "visual_judgement"),
+        ("package", "concept_final_comparison"),
+        ("package", "white_model_position_lock"),
+        ("package", "final_position_retry_plan"),
+        ("package", "image2_flow_audit"),
+    ):
+        capability = capabilities.get(capability_key) if isinstance(capabilities.get(capability_key), dict) else {}
+        status = str(capability.get("status") or "").lower()
+        if status and status not in {"pass", "complete", "ok", "not_needed", "not_applicable"}:
+            warnings.setdefault(stage_id, []).append(f"{capability_key}: {status}")
+    if str(summary.get("status") or "").lower() == "awaiting_external_imagegen":
+        pending_stage = AUTO_SCENE_PENDING_STAGE_MAP.get(str(summary.get("stage") or ""), str(summary.get("stage") or ""))
+        if pending_stage in warnings:
+            warnings[pending_stage].append("awaiting_external_imagegen")
+    return warnings
+
+
+def _build_auto_scene_stage_manifest(
+    *,
+    summary: dict[str, Any],
+    stage_events: list[dict[str, Any]] | None,
+    tool_calls: list[dict[str, Any]] | None,
+    current_stage: str | None = None,
+) -> dict[str, Any]:
+    latest_messages = _latest_stage_messages(stage_events)
+    tool_counts, tool_errors = _auto_scene_tool_stage_stats(tool_calls)
+    warnings = _auto_scene_stage_warning_map(summary)
+    summary_status = str(summary.get("status") or "")
+    pending_stage = AUTO_SCENE_PENDING_STAGE_MAP.get(current_stage or str(summary.get("stage") or ""), current_stage or str(summary.get("stage") or ""))
+    stages: list[dict[str, Any]] = []
+    pending_index = AUTO_SCENE_STAGE_IDS.index(pending_stage) if pending_stage in AUTO_SCENE_STAGE_IDS else -1
+    observed = {
+        str(event.get("stage") or "")
+        for event in stage_events or []
+        if str(event.get("stage") or "") in AUTO_SCENE_STAGE_IDS
+    }
+
+    for index, stage_id in enumerate(AUTO_SCENE_STAGE_IDS):
+        stage_warnings = warnings.get(stage_id, [])
+        error = tool_errors.get(stage_id, "")
+        if pending_index >= 0:
+            if index < pending_index:
+                status = "complete"
+            elif index == pending_index:
+                status = "awaiting_external_imagegen" if summary_status == "awaiting_external_imagegen" else "running"
+            else:
+                status = "pending"
+        elif summary_status == "failed" and error:
+            status = "failed"
+        elif stage_warnings:
+            status = "needs_review"
+        elif summary_status in {"complete", "needs_review", "failed"} or stage_id in observed or tool_counts.get(stage_id):
+            status = "complete"
+        else:
+            status = "pending"
+        message = latest_messages.get(stage_id) or ""
+        if not message and status == "awaiting_external_imagegen":
+            message = "Awaiting external Codex image2 output before continuing"
+        elif not message and status in {"complete", "needs_review"}:
+            message = f"{AUTO_SCENE_STAGE_LABELS.get(stage_id, stage_id)} finished"
+        elif not message and status == "pending":
+            message = f"{AUTO_SCENE_STAGE_LABELS.get(stage_id, stage_id)} has not started"
+        stages.append(
+            {
+                "id": stage_id,
+                "label": AUTO_SCENE_STAGE_LABELS.get(stage_id, stage_id),
+                "status": status,
+                "message": message,
+                "progress": 1.0 if status in {"complete", "needs_review"} else 0.0,
+                "artifacts": _auto_scene_stage_artifacts(summary, stage_id),
+                "warnings": stage_warnings,
+                "error": error,
+                "retry_count": max(0, tool_counts.get(stage_id, 0) - 1),
+            }
+        )
+    return {
+        "type": "auto_scene_stages",
+        "status": summary_status,
+        "task_id": summary.get("task_id", ""),
+        "workdir": _absolute_artifact_path(summary.get("workdir", "")),
+        "stage_count": len(stages),
+        "stages": stages,
+    }
+
+
+def _write_auto_scene_stage_manifest(
+    *,
+    workdir: Path,
+    summary: dict[str, Any],
+    stage_events: list[dict[str, Any]] | None,
+    tool_calls: list[dict[str, Any]] | None,
+    current_stage: str | None = None,
+) -> str:
+    path = workdir / "reports" / "stages.json"
+    write_manifest(
+        path,
+        _build_auto_scene_stage_manifest(
+            summary=summary,
+            stage_events=stage_events,
+            tool_calls=tool_calls,
+            current_stage=current_stage,
+        ),
+    )
+    return _absolute_artifact_path(path)
+
+
 def _pending_external_imagegen_summary(
     *,
     workdir: Path,
@@ -4331,6 +5218,7 @@ def _pending_external_imagegen_summary(
     request_error: ExternalImagegenRequired,
     stage: str,
     planning_info: dict[str, Any] | None = None,
+    stage_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reports_dir = workdir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -4350,6 +5238,8 @@ def _pending_external_imagegen_summary(
         "module_layout_check": workdir / "modules" / "module_layout_check.json",
         "module_reference_batch_request": workdir / "modules" / "imagegen_batch_request.json",
         "module_reference_image2_handoff": workdir / "modules" / "codex_image2_batch_handoff.md",
+        "white_model_position_contract": workdir / "reports" / "white_model_position_contract.json",
+        "white_position_contract_overlay": workdir / "final" / "white_position_contract_overlay.png",
         "final_image2_request": workdir / "final" / "codex_image2_final_request.json",
         "tool_calls": tool_calls_path,
         "run_log": workdir / "reports" / "run.log",
@@ -4376,6 +5266,16 @@ def _pending_external_imagegen_summary(
         "artifact_urls": {key: f"/api/file?path={value}" for key, value in artifacts.items() if Path(str(value)).suffix},
         "elapsed_seconds": round(time.time() - started, 3),
     }
+    stages_path = _write_auto_scene_stage_manifest(
+        workdir=workdir,
+        summary=summary,
+        stage_events=stage_events,
+        tool_calls=tool_executor.calls,
+        current_stage=stage,
+    )
+    summary["stages"] = stages_path
+    summary["artifacts"]["stages"] = stages_path
+    summary["artifact_urls"]["stages"] = f"/api/file?path={stages_path}"
     write_manifest(workdir / "auto_scene_summary.json", summary)
     return summary
 
@@ -4443,6 +5343,347 @@ def _camera_alignment_checks(render_manifest_path: str | Path) -> tuple[dict[str
         "hero_camera_low_angle": 3.0 <= elevation <= 14.0,
     }
     return checks, camera
+
+
+def _load_gray_array(path: str | Path, size: tuple[int, int] = (512, 512)) -> np.ndarray:
+    image = Image.open(path).convert("L").resize(size, Image.Resampling.LANCZOS)
+    return np.asarray(image, dtype=np.float32)
+
+
+def _mask_from_channel(path: str | Path, size: tuple[int, int] = (512, 512)) -> np.ndarray:
+    gray = _load_gray_array(path, size=size)
+    return gray > 24.0
+
+
+def _foreground_mask_from_rgb(path: str | Path, size: tuple[int, int] = (512, 512)) -> np.ndarray:
+    image = Image.open(path).convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    arr = np.asarray(image, dtype=np.float32)
+    border = np.concatenate([arr[:16, :, :].reshape(-1, 3), arr[-16:, :, :].reshape(-1, 3), arr[:, :16, :].reshape(-1, 3), arr[:, -16:, :].reshape(-1, 3)], axis=0)
+    background = np.median(border, axis=0)
+    diff = np.linalg.norm(arr - background, axis=2)
+    threshold = max(18.0, float(np.std(diff)) * 1.25)
+    mask = diff > threshold
+    mask_image = Image.fromarray((mask.astype(np.uint8) * 255), mode="L").filter(ImageFilter.MaxFilter(5))
+    return np.asarray(mask_image, dtype=np.uint8) > 0
+
+
+def _edge_mask(path: str | Path, size: tuple[int, int] = (512, 512), *, threshold: float = 28.0) -> np.ndarray:
+    gray = Image.open(path).convert("L").resize(size, Image.Resampling.LANCZOS)
+    edge = gray.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.MaxFilter(3))
+    return np.asarray(edge, dtype=np.float32) > threshold
+
+
+def _binary_bbox(mask: np.ndarray) -> list[float] | None:
+    ys, xs = np.where(mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    height, width = mask.shape
+    return [
+        round(float(xs.min() / width), 6),
+        round(float(ys.min() / height), 6),
+        round(float((xs.max() + 1) / width), 6),
+        round(float((ys.max() + 1) / height), 6),
+    ]
+
+
+def _bbox_metrics(reference_bbox: list[float] | None, final_bbox: list[float] | None) -> dict[str, float]:
+    if not reference_bbox or not final_bbox:
+        return {"bbox_iou": 0.0, "center_alignment": 0.0, "scale_alignment": 0.0}
+    ax0, ay0, ax1, ay1 = reference_bbox
+    bx0, by0, bx1, by1 = final_bbox
+    inter_w = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    inter_h = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter = inter_w * inter_h
+    area_a = max(1e-6, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1e-6, (bx1 - bx0) * (by1 - by0))
+    bbox_iou = inter / max(1e-6, area_a + area_b - inter)
+    acx, acy = (ax0 + ax1) * 0.5, (ay0 + ay1) * 0.5
+    bcx, bcy = (bx0 + bx1) * 0.5, (by0 + by1) * 0.5
+    center_distance = math.sqrt((acx - bcx) ** 2 + (acy - bcy) ** 2)
+    center_alignment = max(0.0, 1.0 - center_distance / 0.24)
+    scale_alignment = max(0.0, 1.0 - abs(area_a - area_b) / max(area_a, area_b))
+    return {
+        "bbox_iou": round(float(bbox_iou), 6),
+        "center_alignment": round(float(center_alignment), 6),
+        "scale_alignment": round(float(scale_alignment), 6),
+    }
+
+
+def _edge_f1(reference_edge: np.ndarray, final_edge: np.ndarray) -> float:
+    reference_image = Image.fromarray((reference_edge.astype(np.uint8) * 255), mode="L").filter(ImageFilter.MaxFilter(9))
+    final_image = Image.fromarray((final_edge.astype(np.uint8) * 255), mode="L").filter(ImageFilter.MaxFilter(9))
+    reference_dilated = np.asarray(reference_image, dtype=np.uint8) > 0
+    final_dilated = np.asarray(final_image, dtype=np.uint8) > 0
+    if not reference_edge.any() or not final_edge.any():
+        return 0.0
+    precision = float((final_edge & reference_dilated).sum()) / max(1.0, float(final_edge.sum()))
+    recall = float((reference_edge & final_dilated).sum()) / max(1.0, float(reference_edge.sum()))
+    if precision + recall == 0:
+        return 0.0
+    return round(float(2.0 * precision * recall / (precision + recall)), 6)
+
+
+def _write_position_lock_overlay(
+    *,
+    output_image: str | Path,
+    reference_rgb: str | Path,
+    final_image: str | Path,
+    reference_bbox: list[float] | None,
+    final_bbox: list[float] | None,
+) -> str:
+    output = Path(output_image)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    panel_size = (420, 420)
+    label_h = 34
+    sheet = Image.new("RGB", (panel_size[0] * 2, panel_size[1] + label_h), (255, 255, 255))
+    draw = ImageDraw.Draw(sheet)
+    panels = [("White-model lock", reference_rgb, reference_bbox, (54, 132, 245)), ("Final render", final_image, final_bbox, (225, 74, 76))]
+    for index, (label, path, bbox, color) in enumerate(panels):
+        x = index * panel_size[0]
+        panel = _resize_panel(path, panel_size)
+        panel_draw = ImageDraw.Draw(panel)
+        if bbox:
+            x0, y0, x1, y1 = bbox
+            panel_draw.rectangle(
+                [int(x0 * panel_size[0]), int(y0 * panel_size[1]), int(x1 * panel_size[0]), int(y1 * panel_size[1])],
+                outline=color,
+                width=4,
+            )
+        sheet.paste(panel, (x, label_h))
+        draw.rectangle([x, 0, x + panel_size[0] - 1, label_h - 1], fill=(28, 31, 36))
+        draw.text((x + 12, 10), label, fill=(242, 244, 247))
+    sheet.save(output)
+    return str(output)
+
+
+def create_white_model_position_lock_report(
+    *,
+    final_image: str | Path,
+    render_manifest: str | Path,
+    output_report: str | Path,
+    output_image: str | Path,
+) -> dict[str, Any]:
+    hero = _render_hero_view(render_manifest)
+    files = dict(hero.get("files", {})) if hero else {}
+    reference_rgb = str(files.get("rgb") or "")
+    reference_mask_path = str(files.get("mask") or "")
+    reference_edge_path = str(files.get("edge") or "")
+    report_path = Path(output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    if not reference_rgb or not Path(reference_rgb).exists() or not Path(final_image).exists():
+        report = {
+            "type": "white_model_position_lock",
+            "status": "needs_review",
+            "render_manifest": _absolute_artifact_path(render_manifest),
+            "final_image": _absolute_artifact_path(final_image),
+            "failure_reasons": ["missing_reference_or_final_image"],
+            "metrics": {},
+        }
+        write_manifest(report_path, report)
+        return report
+
+    size = (512, 512)
+    reference_mask = _mask_from_channel(reference_mask_path, size=size) if reference_mask_path and Path(reference_mask_path).exists() else _foreground_mask_from_rgb(reference_rgb, size=size)
+    final_mask = _foreground_mask_from_rgb(final_image, size=size)
+    reference_edge = _mask_from_channel(reference_edge_path, size=size) if reference_edge_path and Path(reference_edge_path).exists() else _edge_mask(reference_rgb, size=size)
+    final_edge = _edge_mask(final_image, size=size)
+    reference_bbox = _binary_bbox(reference_mask)
+    final_bbox = _binary_bbox(final_mask)
+    bbox = _bbox_metrics(reference_bbox, final_bbox)
+    edge_f1 = _edge_f1(reference_edge, final_edge)
+    mask_intersection = float((reference_mask & final_mask).sum())
+    mask_union = float((reference_mask | final_mask).sum())
+    mask_iou = round(mask_intersection / max(1.0, mask_union), 6)
+    total = round(
+        float(
+            bbox["bbox_iou"] * 0.22
+            + bbox["center_alignment"] * 0.26
+            + bbox["scale_alignment"] * 0.18
+            + edge_f1 * 0.24
+            + mask_iou * 0.10
+        ),
+        6,
+    )
+    checks = {
+        "bbox_iou": bbox["bbox_iou"] >= 0.42,
+        "center_alignment": bbox["center_alignment"] >= 0.70,
+        "scale_alignment": bbox["scale_alignment"] >= 0.55,
+        "edge_f1": edge_f1 >= 0.28,
+        "total": total >= 0.58,
+    }
+    failures = [key for key, passed in checks.items() if not passed]
+    overlay = _write_position_lock_overlay(
+        output_image=output_image,
+        reference_rgb=reference_rgb,
+        final_image=final_image,
+        reference_bbox=reference_bbox,
+        final_bbox=final_bbox,
+    )
+    report = {
+        "type": "white_model_position_lock",
+        "status": "pass" if not failures else "needs_review",
+        "render_manifest": _absolute_artifact_path(render_manifest),
+        "reference_view_id": str(hero.get("view_id", "")) if hero else "",
+        "reference_rgb": _absolute_artifact_path(reference_rgb),
+        "reference_mask": _absolute_artifact_path(reference_mask_path),
+        "reference_edge": _absolute_artifact_path(reference_edge_path),
+        "final_image": _absolute_artifact_path(final_image),
+        "overlay_image": _absolute_artifact_path(overlay),
+        "reference_bbox": reference_bbox,
+        "final_bbox": final_bbox,
+        "metrics": {
+            **bbox,
+            "edge_f1": edge_f1,
+            "mask_iou": mask_iou,
+            "total": total,
+        },
+        "checks": checks,
+        "failure_reasons": failures,
+        "notes": [
+            "This report compares the final render to the selected white-model hero render in screen space.",
+            "It is a lightweight gate for position, scale, silhouette, and edge drift before manual visual review.",
+        ],
+    }
+    write_manifest(report_path, report)
+    return report
+
+
+def create_final_position_retry_plan(
+    *,
+    workdir: Path,
+    final_request_path: str | Path,
+    white_lock_report: dict[str, Any],
+    position_contract_path: str | Path,
+    output_report: str | Path,
+) -> dict[str, Any]:
+    report_path = Path(output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    final_dir = Path(workdir) / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    status = str(white_lock_report.get("status") or "")
+    request_path = Path(final_request_path) if final_request_path and Path(final_request_path).exists() else None
+    if status == "pass":
+        report = {
+            "type": "final_position_retry_plan",
+            "status": "not_needed",
+            "reason": "white_model_position_lock_passed",
+            "white_model_position_lock": white_lock_report,
+            "position_contract": _absolute_artifact_path(position_contract_path),
+        }
+        write_manifest(report_path, report)
+        return report
+    if not request_path:
+        report = {
+            "type": "final_position_retry_plan",
+            "status": "not_applicable",
+            "reason": "final_image2_request_missing",
+            "white_model_position_lock": white_lock_report,
+            "position_contract": _absolute_artifact_path(position_contract_path),
+        }
+        write_manifest(report_path, report)
+        return report
+
+    original = read_manifest(request_path)
+    original_requests = [item for item in original.get("requests", []) if isinstance(item, dict)]
+    if not original_requests:
+        report = {
+            "type": "final_position_retry_plan",
+            "status": "not_applicable",
+            "reason": "final_image2_request_has_no_items",
+            "white_model_position_lock": white_lock_report,
+            "position_contract": _absolute_artifact_path(position_contract_path),
+        }
+        write_manifest(report_path, report)
+        return report
+
+    contracts_by_view = _position_contract_by_view(position_contract_path)
+    retry_requests: list[dict[str, Any]] = []
+    for index, item in enumerate(original_requests, start=1):
+        view_id = str(item.get("view_id") or f"view_{index}")
+        if view_id not in {"view_hero", "view_locked"} and index > 1:
+            continue
+        contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else contracts_by_view.get(view_id, {})
+        prompt_parts = [
+            str(item.get("prompt") or ""),
+            "Position-lock correction pass: preserve the white-model contract as the exact screen-space target.",
+            f"Target bbox {contract.get('bbox_norm', [])}, center {contract.get('center_norm', [])}, coverage {contract.get('coverage_ratio', '')}.",
+            f"Previous position check metrics: {white_lock_report.get('metrics', {})}.",
+            f"Correction focus: {white_lock_report.get('failure_reasons', [])}.",
+            "Keep the same crop, perspective, foreground/background order, object overlaps, module positions, relative scale, silhouette, and visible object count from the white-model channels.",
+        ]
+        retry_item = {
+            "view_id": view_id,
+            "source_render_view_id": item.get("source_render_view_id", view_id),
+            "kind": "final_render_position_retry",
+            "provider": "codex_builtin_image2",
+            "attempt": 1,
+            "output_path": _absolute_artifact_path(item.get("output_path") or final_dir / _final_output_filename(view_id)),
+            "prompt": "\n\n".join(part for part in prompt_parts if part),
+            "input_images": item.get("input_images", []),
+            "position_lock": {
+                **(item.get("position_lock") if isinstance(item.get("position_lock"), dict) else {}),
+                "retry_policy": "correct_to_white_model_position_contract",
+                "white_model_position_lock_status": status,
+                "failure_reasons": white_lock_report.get("failure_reasons", []),
+            },
+            "position_lock_contract": contract,
+            "previous_final_image": white_lock_report.get("final_image", ""),
+        }
+        retry_requests.append(retry_item)
+
+    retry_request_path = final_dir / "codex_image2_position_retry_request.json"
+    handoff_path = final_dir / "codex_image2_position_retry_handoff.md"
+    import_parts = []
+    for index, item in enumerate(retry_requests, start=1):
+        key = str(item.get("view_id") or f"view_{index}")
+        import_parts.append(f"--image {key}=/path/to/codex-image2-position-retry-{index}.png")
+    retry_request = {
+        "type": "codex_image2_position_retry_request",
+        "kind": "final_render_position_retry_batch",
+        "status": "awaiting_codex_image2",
+        "provider": "codex_builtin_image2",
+        "request_path": str(retry_request_path.resolve()),
+        "codex_image2_handoff": str(handoff_path.resolve()),
+        "reference_policy": "white_model_position_locked_render_channels_only",
+        "original_request": _absolute_artifact_path(request_path),
+        "white_model_position_contract": _absolute_artifact_path(position_contract_path),
+        "white_model_position_lock": white_lock_report,
+        "request_count": len(retry_requests),
+        "requests": retry_requests,
+        "output_paths": [item["output_path"] for item in retry_requests],
+        "import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-image2 "
+            f"--request {retry_request_path.resolve()} "
+            + " ".join(import_parts)
+        ),
+        "latest_import_command": (
+            "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
+            f"--request {retry_request_path.resolve()}"
+        ),
+        "instruction": (
+            "Use Codex built-in image2 with the same render-channel inputs and the stricter white-model position contract. "
+            "Import the corrected output, then rerun Auto Scene so the position lock report can validate it."
+        ),
+    }
+    _write_codex_image2_handoff(
+        handoff_path=handoff_path,
+        request=retry_request,
+        batch_requests=retry_requests,
+    )
+    write_manifest(retry_request_path, retry_request)
+    report = {
+        "type": "final_position_retry_plan",
+        "status": "awaiting_codex_image2_retry" if retry_requests else "not_applicable",
+        "reason": "white_model_position_lock_needs_review",
+        "retry_request": _absolute_artifact_path(retry_request_path),
+        "codex_image2_handoff": _absolute_artifact_path(handoff_path),
+        "white_model_position_contract": _absolute_artifact_path(position_contract_path),
+        "white_model_position_lock_status": status,
+        "failure_reasons": white_lock_report.get("failure_reasons", []),
+        "request_count": len(retry_requests),
+    }
+    write_manifest(report_path, report)
+    return report
 
 
 def create_concept_final_comparison(
@@ -4514,8 +5755,17 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     workdir = Path(options.output_dir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     log_path = workdir / "reports" / "run.log"
+    stage_events: list[dict[str, Any]] = []
 
     def emit(stage: str, message: str, fraction: float) -> None:
+        stage_events.append(
+            {
+                "time": time.strftime("%H:%M:%S"),
+                "stage": stage,
+                "message": message,
+                "progress": fraction,
+            }
+        )
         _write_log(log_path, stage, message, fraction)
         if progress:
             progress(stage, message, fraction)
@@ -4567,6 +5817,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             request_error=exc,
             stage="concept_image_generation",
             planning_info=planning_info,
+            stage_events=stage_events,
         )
     concept_review_path = workdir / "concept" / "concept_review.json"
     concept_review = tool_executor.run(
@@ -4602,6 +5853,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                 request_error=exc,
                 stage="concept_image_regeneration",
                 planning_info=planning_info,
+                stage_events=stage_events,
             )
         concept_review = tool_executor.run(
             "concept_image_review",
@@ -4688,6 +5940,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             request_error=exc,
             stage="module_reference_generation",
             planning_info=planning_info,
+            stage_events=stage_events,
         )
     module_reference_review_path = workdir / "modules" / "module_reference_review.json"
     module_reference_review = tool_executor.run(
@@ -4734,6 +5987,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                 request_error=exc,
                 stage="module_reference_regeneration",
                 planning_info=planning_info,
+                stage_events=stage_events,
             )
         module_reference_review = tool_executor.run(
             "module_reference_review",
@@ -4780,12 +6034,20 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "module_mesh_sanity",
         {"module_asset_manifest": str(asset_manifest_path)},
         lambda: {
-            "status": "pass" if not asset_manifest.get("failed_modules") else "needs_review",
+            "type": "module_mesh_sanity",
+            "status": "pass" if not asset_manifest.get("failed_modules") and not asset_manifest.get("quality_issues") else "needs_review",
             "module_count": len(asset_manifest.get("modules", [])),
             "failed_modules": asset_manifest.get("failed_modules", []),
+            "quality_issues": asset_manifest.get("quality_issues", []),
             "fallback_policy": asset_manifest.get("failed_modules", []),
+            "module_sanity_files": [
+                str((workdir / "modules" / str(item.get("module_id", "")) / "sanity.json").resolve())
+                for item in asset_manifest.get("modules", [])
+                if item.get("module_id")
+            ],
         },
     )
+    module_mesh_sanity_path = write_manifest(workdir / "reports" / "module_mesh_sanity.json", sanity_summary)
 
     emit("layout", "Planning module scale, placement, and collision policy", 0.58)
     scene_assembly = tool_executor.run("scene_layout_agent", {"module_count": len(module_plan.get("modules", []))}, lambda: plan_scene_layout(scene_plan, module_plan, asset_manifest))
@@ -4804,6 +6066,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             config=runtime_config,
             render_backend=options.render_backend,
             dry_run=options.dry_run,
+            concept_image=concept_image,
         ),
     )
     camera_plan = camera_selection.get("camera_plan", camera_plan)
@@ -4827,6 +6090,22 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         ),
     )
 
+    final_dir = workdir / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    emit("agent", "Writing white-model screen-space position contract for final image2", 0.82)
+    white_model_position_contract = tool_executor.run(
+        "white_model_position_contract",
+        {"render_manifest": str(render_manifest_path), "views": auto_task["output_views"]},
+        lambda: create_white_model_position_contract(
+            render_manifest=render_manifest_path,
+            output_report=workdir / "reports" / "white_model_position_contract.json",
+            output_image=final_dir / "white_position_contract_overlay.png",
+            output_views=int(auto_task.get("output_views", 3)),
+        ),
+    )
+    white_model_position_contract_path = workdir / "reports" / "white_model_position_contract.json"
+    white_position_contract_overlay_path = final_dir / "white_position_contract_overlay.png"
+
     final_render_provider = _auto_scene_final_render_provider(runtime_config, options)
     if final_render_provider == "codex_image2":
         emit("agent", "Requesting Codex image2 final render from white-model position-lock channels", 0.84)
@@ -4840,6 +6119,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                     prompt_plan=prompt_plan,
                     concept_image=concept_image,
                     output_views=int(auto_task.get("output_views", 3)),
+                    position_contract_path=white_model_position_contract_path,
                 ),
             )
         except ExternalImagegenRequired as exc:
@@ -4852,6 +6132,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                 request_error=exc,
                 stage="final_image2_render",
                 planning_info=planning_info,
+                stage_events=stage_events,
             )
     else:
         emit("agent", "Running final geometry-locked AI rendering from render_manifest channels", 0.84)
@@ -4896,10 +6177,15 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     emit("consistency", "Recording multiview consistency result", 0.95)
 
     emit("package", "Packaging auto-scene outputs", 0.97)
-    final_dir = workdir / "final"
     final_image = _copy_or_blank(agent_summary.get("final_image"), final_dir / "final_view_hero.png")
     contact_sheet = _copy_or_blank(agent_summary.get("multiview_contact_sheet") or agent_summary.get("three_view_contact"), final_dir / "contact_sheet.png")
     comparison_image = _copy_or_blank(agent_summary.get("comparison_image"), final_dir / "white_vs_final.png")
+    white_channels = create_white_channel_contact_sheet(
+        render_manifest_path=render_manifest_path,
+        output_path=final_dir / "white_channels_contact_sheet.png",
+    )
+    white_render = white_channels.get("white_render", "")
+    white_channel_contact_sheet = white_channels.get("contact_sheet", "")
     final_view_images: dict[str, str] = {}
     for view_id, source in dict(agent_summary.get("final_view_images", {})).items():
         target_name = f"final_{view_id}.png"
@@ -4913,8 +6199,22 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "render_manifest": str(render_manifest_path),
         "agent_report": str(agent_report),
         "camera_search_report": str(camera_selection.get("report_path", "")),
+        "assembly_report": str(scene_outputs.get("assembly_report", "")),
     }
     final_scene_manifest_path = write_manifest(workdir / "scene" / "final_scene_manifest.json", final_scene_manifest)
+    module_assets_index = tool_executor.run(
+        "module_assets_index",
+        {"module_count": len(module_plan.get("modules", [])), "module_asset_manifest": str(asset_manifest_path)},
+        lambda: create_module_assets_index(
+            workdir=workdir,
+            module_plan=module_plan,
+            asset_manifest=asset_manifest,
+            output_report=workdir / "reports" / "module_assets_index.json",
+            output_contact_sheet=final_dir / "module_references_contact_sheet.png",
+        ),
+    )
+    module_assets_index_path = workdir / "reports" / "module_assets_index.json"
+    module_references_contact_sheet_path = final_dir / "module_references_contact_sheet.png"
     visual = visual_judgement_report(final_image=final_image, comparison_image=comparison_image, contact_sheet=contact_sheet, agent_summary=agent_summary)
     visual_path = write_manifest(workdir / "reports" / "visual_judgement.json", visual)
     concept_final_comparison = tool_executor.run(
@@ -4929,14 +6229,48 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         ),
     )
     concept_final_comparison_path = workdir / "reports" / "concept_final_comparison.json"
+    white_model_position_lock = tool_executor.run(
+        "white_model_position_lock",
+        {"final_image": str(final_image), "render_manifest": str(render_manifest_path)},
+        lambda: create_white_model_position_lock_report(
+            final_image=final_image,
+            render_manifest=render_manifest_path,
+            output_report=workdir / "reports" / "white_model_position_lock.json",
+            output_image=final_dir / "white_position_lock_overlay.png",
+        ),
+    )
+    white_model_position_lock_path = workdir / "reports" / "white_model_position_lock.json"
+    final_position_retry_plan = tool_executor.run(
+        "final_position_retry_plan",
+        {"white_model_position_lock": white_model_position_lock.get("status", ""), "final_request": str(workdir / "final" / "codex_image2_final_request.json")},
+        lambda: create_final_position_retry_plan(
+            workdir=workdir,
+            final_request_path=workdir / "final" / "codex_image2_final_request.json",
+            white_lock_report=white_model_position_lock,
+            position_contract_path=white_model_position_contract_path,
+            output_report=workdir / "reports" / "final_position_retry_plan.json",
+        ),
+    )
+    final_position_retry_plan_path = workdir / "reports" / "final_position_retry_plan.json"
     tool_calls_path = write_manifest(workdir / "reports" / "tool_calls.json", {"tools": AUTO_SCENE_TOOL_SPECS, "calls": tool_executor.calls})
     status = (
         "complete"
-        if visual["status"] == "pass" and module_scores["total"] >= 0.75 and concept_final_comparison["status"] == "pass"
+        if (
+            visual["status"] == "pass"
+            and module_scores["total"] >= 0.75
+            and sanity_summary["status"] == "pass"
+            and white_model_position_contract["status"] == "pass"
+            and concept_final_comparison["status"] == "pass"
+            and white_model_position_lock["status"] == "pass"
+        )
         else "needs_review"
     )
     if any(item.get("action") == "fail_task" for item in sanity_summary.get("failed_modules", []) if isinstance(item, dict)):
         status = "failed"
+    elif str(sanity_summary.get("status", "")).lower() != "pass":
+        status = "needs_review"
+    elif str(white_model_position_contract.get("status", "")).lower() != "pass":
+        status = "needs_review"
     elif str(module_layout_check.get("status", "")).lower() != "pass":
         status = "needs_review"
     summary = {
@@ -4956,14 +6290,22 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "module_layout_check": str(module_layout_check_path),
         "module_reference_review": str(module_reference_review_path),
         "module_asset_manifest": str(asset_manifest_path),
+        "module_mesh_sanity": str(module_mesh_sanity_path),
+        "module_assets_index": str(module_assets_index_path),
+        "module_references_contact_sheet": str(module_references_contact_sheet_path),
         "scene_assembly": str(scene_assembly_path),
         "final_scene_manifest": str(final_scene_manifest_path),
         "scene_model_path": scene_outputs["scene_model_path"],
+        "assembly_report": str(scene_outputs.get("assembly_report", "")),
         "scene_preview": scene_outputs["scene_preview"],
         "camera_plan": str(camera_plan_path),
         "camera_search_report": str(camera_selection.get("report_path", "")),
         "camera_search_sheet": str(camera_selection.get("contact_sheet", "")),
         "render_manifest": str(render_manifest_path),
+        "white_model_position_contract": str(white_model_position_contract_path),
+        "white_position_contract_overlay": str(white_position_contract_overlay_path),
+        "white_render": str(white_render),
+        "white_channel_contact_sheet": str(white_channel_contact_sheet),
         "module_scores": str(module_scores_path),
         "structure_scores": str(structure_path),
         "multiview_score": str(multiview_path),
@@ -4972,10 +6314,14 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "visual_judgement": str(visual_path),
         "concept_final_comparison": str(concept_final_comparison_path),
         "concept_vs_final": str(final_dir / "concept_vs_final.png"),
+        "white_model_position_lock": str(white_model_position_lock_path),
+        "white_position_lock_overlay": str(final_dir / "white_position_lock_overlay.png"),
+        "final_position_retry_plan": str(final_position_retry_plan_path),
         "final_image": final_image,
         "final_view_images": final_view_images,
         "comparison_image": comparison_image,
         "contact_sheet": contact_sheet,
+        "stages": str(workdir / "reports" / "stages.json"),
         "run_log": str(log_path),
         "elapsed_seconds": round(time.time() - started, 3),
         "reference_policy": {
@@ -4996,11 +6342,25 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             "concept_review": {"enabled": True, "status": concept_review.get("status", "")},
             "module_layout_contract": {"enabled": True, "status": module_layout_check.get("status", ""), "error_count": module_layout_check.get("error_count", 0)},
             "module_reference_review": {"enabled": True, "status": module_reference_review.get("status", "")},
+            "module_mesh_sanity": {
+                "enabled": True,
+                "status": sanity_summary.get("status", ""),
+                "quality_issue_count": len(sanity_summary.get("quality_issues", [])),
+                "failed_module_count": len(sanity_summary.get("failed_modules", [])),
+            },
+            "module_assets_index": {"enabled": True, "status": module_assets_index.get("status", ""), "module_count": module_assets_index.get("module_count", 0)},
             "module_3d_backend": asset_manifest.get("module_3d_backend", ""),
             "render_backend": read_manifest(render_manifest_path).get("render_backend") or read_manifest(render_manifest_path).get("source"),
             "tool_execution": {"enabled": True, "tool_call_count": len(tool_executor.calls), "executed_tool_names": [call["tool"] for call in tool_executor.calls]},
             "visual_judgement": {"enabled": True, "status": visual["status"]},
             "concept_final_comparison": {"enabled": True, "status": concept_final_comparison["status"]},
+            "white_model_position_contract": {
+                "enabled": True,
+                "status": white_model_position_contract.get("status", ""),
+                "contract_count": white_model_position_contract.get("contract_count", 0),
+            },
+            "white_model_position_lock": {"enabled": True, "status": white_model_position_lock["status"], "total": white_model_position_lock.get("metrics", {}).get("total", 0.0)},
+            "final_position_retry_plan": {"enabled": True, "status": final_position_retry_plan.get("status", "")},
         },
     }
     artifact_keys = [
@@ -5014,23 +6374,37 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "module_layout_check",
         "module_reference_review",
         "module_asset_manifest",
+        "module_mesh_sanity",
+        "module_assets_index",
+        "module_references_contact_sheet",
         "scene_assembly",
         "final_scene_manifest",
         "scene_model_path",
+        "assembly_report",
         "scene_preview",
         "camera_plan",
         "camera_search_report",
         "camera_search_sheet",
         "render_manifest",
+        "white_model_position_contract",
+        "white_position_contract_overlay",
+        "white_render",
+        "white_channel_contact_sheet",
         "module_scores",
+        "structure_scores",
+        "multiview_score",
         "agent_report",
         "tool_calls",
         "visual_judgement",
         "concept_final_comparison",
         "concept_vs_final",
+        "white_model_position_lock",
+        "white_position_lock_overlay",
+        "final_position_retry_plan",
         "final_image",
         "comparison_image",
         "contact_sheet",
+        "stages",
         "run_log",
     ]
     for key in artifact_keys:
@@ -5039,6 +6413,54 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     summary["final_view_images"] = {key: _absolute_artifact_path(value) for key, value in final_view_images.items()}
     summary["artifacts"] = {key: summary[key] for key in artifact_keys if summary.get(key)}
     summary["artifact_urls"] = {key: f"/api/file?path={value}" for key, value in summary["artifacts"].items() if Path(str(value)).suffix}
-    write_manifest(workdir / "auto_scene_summary.json", summary)
+    stages_path = _write_auto_scene_stage_manifest(
+        workdir=workdir,
+        summary=summary,
+        stage_events=stage_events,
+        tool_calls=tool_executor.calls,
+    )
+    summary["stages"] = stages_path
+    summary["artifacts"]["stages"] = stages_path
+    summary["artifact_urls"]["stages"] = f"/api/file?path={stages_path}"
+    summary_path = write_manifest(workdir / "auto_scene_summary.json", summary)
+    if not options.dry_run and options.backend != "mock":
+        emit("package", "Auditing model-planned Codex image2 to reviewed 3D flow", 0.985)
+        image2_flow_audit = tool_executor.run(
+            "image2_flow_audit",
+            {"workdir": str(workdir), "require_codex_image2": True, "require_hunyuan_3d": True},
+            lambda: audit_auto_scene_image2_flow(workdir, require_codex_image2=True, require_hunyuan_3d=True, write_report_file=True),
+        )
+        if image2_flow_audit["status"] != "pass" and summary["status"] == "complete":
+            status = "needs_review"
+            summary["status"] = status
+        image2_flow_audit_path = _absolute_artifact_path(workdir / "reports" / "image2_flow_audit.json")
+        summary["image2_flow_audit"] = image2_flow_audit_path
+        summary["capabilities"]["image2_flow_audit"] = {
+            "enabled": True,
+            "status": image2_flow_audit["status"],
+            "passed_required_checks": image2_flow_audit.get("passed_required_checks", 0),
+            "required_checks": image2_flow_audit.get("required_checks", 0),
+        }
+        summary["capabilities"]["tool_execution"] = {
+            "enabled": True,
+            "tool_call_count": len(tool_executor.calls),
+            "executed_tool_names": [call["tool"] for call in tool_executor.calls],
+        }
+        summary["artifacts"]["image2_flow_audit"] = image2_flow_audit_path
+        summary["artifact_urls"]["image2_flow_audit"] = f"/api/file?path={image2_flow_audit_path}"
+        tool_calls_path = write_manifest(workdir / "reports" / "tool_calls.json", {"tools": AUTO_SCENE_TOOL_SPECS, "calls": tool_executor.calls})
+        summary["tool_calls"] = _absolute_artifact_path(tool_calls_path)
+        summary["artifacts"]["tool_calls"] = summary["tool_calls"]
+        summary["artifact_urls"]["tool_calls"] = f"/api/file?path={summary['tool_calls']}"
+        stages_path = _write_auto_scene_stage_manifest(
+            workdir=workdir,
+            summary=summary,
+            stage_events=stage_events,
+            tool_calls=tool_executor.calls,
+        )
+        summary["stages"] = stages_path
+        summary["artifacts"]["stages"] = stages_path
+        summary["artifact_urls"]["stages"] = f"/api/file?path={stages_path}"
+        write_manifest(summary_path, summary)
     emit("complete", f"Auto Scene finished with status={status}", 1.0)
     return summary

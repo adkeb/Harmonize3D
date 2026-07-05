@@ -461,10 +461,24 @@ async function applyAutoSceneSummary(summary = {}) {
   if (summary.global_concept) appendArtifact("global concept", summary.global_concept, urls.global_concept);
   if (summary.scene_preview) appendArtifact("scene preview", summary.scene_preview, urls.scene_preview);
   if (summary.scene_model_path) appendArtifact("final scene glb", summary.scene_model_path, urls.scene_model_path);
+  if (summary.assembly_report) appendArtifact("assembly report", summary.assembly_report, urls.assembly_report);
+  if (summary.white_render) {
+    appendArtifact("white render", summary.white_render, urls.white_render);
+    if (urls.white_render) await setImage("whiteImage", urls.white_render);
+  }
+  if (summary.white_channel_contact_sheet) appendArtifact("white channels", summary.white_channel_contact_sheet, urls.white_channel_contact_sheet);
+  if (summary.white_model_position_contract) appendArtifact("white position contract", summary.white_model_position_contract, urls.white_model_position_contract);
+  if (summary.white_position_contract_overlay) appendArtifact("white position contract overlay", summary.white_position_contract_overlay, urls.white_position_contract_overlay);
   if (summary.scene_plan) appendArtifact("scene plan", summary.scene_plan, urls.scene_plan);
   if (summary.module_plan) appendArtifact("module plan", summary.module_plan, urls.module_plan);
   if (summary.module_asset_manifest) appendArtifact("module asset manifest", summary.module_asset_manifest, urls.module_asset_manifest);
+  if (summary.module_mesh_sanity) appendArtifact("module mesh sanity", summary.module_mesh_sanity, urls.module_mesh_sanity);
+  if (summary.module_assets_index) appendArtifact("module assets index", summary.module_assets_index, urls.module_assets_index);
+  if (summary.module_references_contact_sheet) appendArtifact("module references", summary.module_references_contact_sheet, urls.module_references_contact_sheet);
   if (summary.module_scores) appendArtifact("module scores", summary.module_scores, urls.module_scores);
+  if (summary.structure_scores) appendArtifact("structure scores", summary.structure_scores, urls.structure_scores);
+  if (summary.multiview_score) appendArtifact("multiview score", summary.multiview_score, urls.multiview_score);
+  if (summary.final_position_retry_plan) appendArtifact("final position retry plan", summary.final_position_retry_plan, urls.final_position_retry_plan);
 }
 
 async function pollAutoScene(taskId) {

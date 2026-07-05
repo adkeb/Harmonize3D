@@ -181,7 +181,11 @@ def _mark_auto_stage_artifacts(job: dict[str, Any], summary: dict[str, Any]) -> 
         "source": {"model_path": summary.get("model_path", ""), "mesh_metadata": summary.get("mesh_metadata", "")},
         "mesh_check": {"mesh_sanity": summary.get("mesh_sanity", "")},
         "camera": {"camera_plan": summary.get("camera_plan", "")},
-        "render": {"render_manifest": summary.get("render_manifest", "")},
+        "render": {
+            "render_manifest": summary.get("render_manifest", ""),
+            "white_render": summary.get("white_render", ""),
+            "white_channel_contact_sheet": summary.get("white_channel_contact_sheet", ""),
+        },
         "agent": {
             "agent_report": summary.get("agent_report", ""),
             "final_image": summary.get("final_image", ""),
@@ -225,18 +229,31 @@ def _mark_auto_scene_stage_artifacts(job: dict[str, Any], summary: dict[str, Any
             "global_concept": summary.get("global_concept", ""),
         },
         "decompose": {"scene_plan": summary.get("scene_plan", ""), "module_plan": summary.get("module_plan", "")},
-        "module_reference": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
-        "module_3d": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
-        "module_check": {"module_asset_manifest": summary.get("module_asset_manifest", "")},
+        "module_reference": {
+            "module_asset_manifest": summary.get("module_asset_manifest", ""),
+            "module_assets_index": summary.get("module_assets_index", ""),
+            "module_references_contact_sheet": summary.get("module_references_contact_sheet", ""),
+        },
+        "module_3d": {"module_asset_manifest": summary.get("module_asset_manifest", ""), "module_assets_index": summary.get("module_assets_index", "")},
+        "module_check": {
+            "module_asset_manifest": summary.get("module_asset_manifest", ""),
+            "module_mesh_sanity": summary.get("module_mesh_sanity", ""),
+            "module_assets_index": summary.get("module_assets_index", ""),
+        },
         "layout": {"scene_assembly": summary.get("scene_assembly", "")},
         "scene_preview": {
             "scene_model_path": summary.get("scene_model_path", ""),
             "scene_preview": summary.get("scene_preview", ""),
             "final_scene_manifest": summary.get("final_scene_manifest", ""),
+            "assembly_report": summary.get("assembly_report", ""),
         },
         "camera": {"camera_plan": summary.get("camera_plan", "")},
         "render": {"render_manifest": summary.get("render_manifest", "")},
-        "agent": {"agent_report": summary.get("agent_report", "")},
+        "agent": {
+            "white_model_position_contract": summary.get("white_model_position_contract", ""),
+            "white_position_contract_overlay": summary.get("white_position_contract_overlay", ""),
+            "agent_report": summary.get("agent_report", ""),
+        },
         "score": {
             "module_scores": summary.get("module_scores", ""),
             "structure_scores": summary.get("structure_scores", ""),
@@ -248,12 +265,18 @@ def _mark_auto_scene_stage_artifacts(job: dict[str, Any], summary: dict[str, Any
             "comparison_image": summary.get("comparison_image", ""),
             "contact_sheet": summary.get("contact_sheet", ""),
             "visual_judgement": summary.get("visual_judgement", ""),
+            "white_model_position_lock": summary.get("white_model_position_lock", ""),
+            "white_position_lock_overlay": summary.get("white_position_lock_overlay", ""),
+            "final_position_retry_plan": summary.get("final_position_retry_plan", ""),
+            "image2_flow_audit": summary.get("image2_flow_audit", ""),
+            "stages": summary.get("stages", ""),
             "run_log": summary.get("run_log", ""),
         },
         "complete": {
             "auto_scene_summary": str(Path(summary.get("workdir", "")) / "auto_scene_summary.json") if summary.get("workdir") else "",
             "visual_judgement": summary.get("visual_judgement", ""),
             "contact_sheet": summary.get("contact_sheet", ""),
+            "stages": summary.get("stages", ""),
         },
     }
     stages = _stage_map(job)
