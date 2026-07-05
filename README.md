@@ -186,6 +186,15 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2
   --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
 ```
 
+When `reports/final_position_retry_plan.json` reports `awaiting_codex_image2_retry`, the corrected final-render loop can be resumed from the workdir. The command reads the retry request, imports the latest Codex image2 result, then reruns the same Auto Scene workdir with the original task options from `auto_task.json`/`auto_scene_summary.json`:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
+  --workdir outputs/auto_scene/demo_showroom
+```
+
+Use `--dry-plan` to print the retry request and handoff without changing files, or `--import-only` when you only want to copy the latest Codex image2 outputs into the retry request before a manual rerun.
+
 Real non-mock runs also package `reports/image2_flow_audit.json`. To rerun the same audit manually after a run advances past module generation:
 
 ```bash

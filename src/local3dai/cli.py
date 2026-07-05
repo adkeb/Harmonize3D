@@ -13,6 +13,7 @@ from .auto_scene import AutoSceneOptions, audit_auto_scene_image2_flow, import_c
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
 from .environment import detect_environment, print_report
+from .manifest import read_manifest
 from .modelgen import generate_3d_model
 from .rendering.blender import render_model_with_blender
 from .sample import create_sample_renders
@@ -334,6 +335,99 @@ def cmd_auto_scene_import_latest_image2(args: argparse.Namespace) -> int:
     return 0
 
 
+def _auto_scene_options_from_workdir(workdir: Path, args: argparse.Namespace) -> AutoSceneOptions:
+    summary_path = workdir / "auto_scene_summary.json"
+    auto_task_path = workdir / "auto_task.json"
+    summary = read_manifest(summary_path) if summary_path.exists() else {}
+    auto_task = read_manifest(auto_task_path) if auto_task_path.exists() else {}
+    request = args.request or summary.get("request") or auto_task.get("user_request") or auto_task.get("expanded_request")
+    if not request:
+        raise ValueError("Cannot infer the Auto Scene request from the workdir; pass --request.")
+
+    return AutoSceneOptions(
+        request=str(request),
+        output_dir=workdir,
+        config_path=Path(args.config),
+        output_views=int(args.views or auto_task.get("output_views") or 3),
+        quality_mode=str(args.quality or auto_task.get("quality_mode") or "balanced"),
+        geometry_mode=str(args.geometry or auto_task.get("geometry_mode") or "strict"),
+        style_preset=str(args.style or auto_task.get("style_preset") or "exhibition"),
+        backend_model_key=args.model_key,
+        backend=args.backend,
+        num_candidates_per_view=int(args.candidates or auto_task.get("num_candidates_per_view") or 3),
+        max_retries=int(args.max_retries if args.max_retries is not None else auto_task.get("max_retries", 2)),
+        seed=int(args.seed if args.seed is not None else auto_task.get("seed", 20260610)),
+        allow_procedural_fallback=bool(args.allow_procedural_fallback),
+        require_concept_confirmation=False,
+        dry_run=bool(args.dry_run or args.backend == "mock"),
+        use_llm=not args.no_llm,
+        render_backend=args.render_backend,
+        hero_model_path=Path(args.hero_model) if args.hero_model else None,
+    )
+
+
+def _retry_request_from_plan(workdir: Path, plan: dict[str, Any]) -> Path:
+    raw_path = str(plan.get("retry_request") or workdir / "final" / "codex_image2_position_retry_request.json")
+    request_path = Path(raw_path).expanduser()
+    if not request_path.is_absolute():
+        request_path = workdir / request_path
+    return request_path
+
+
+def cmd_auto_scene_run_position_retry(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir).expanduser().resolve()
+    plan_path = workdir / "reports" / "final_position_retry_plan.json"
+    if not plan_path.exists():
+        raise FileNotFoundError(f"Missing final position retry plan: {plan_path}")
+
+    plan = read_manifest(plan_path)
+    retry_request = _retry_request_from_plan(workdir, plan)
+    status = str(plan.get("status") or "")
+    result: dict[str, Any] = {
+        "workdir": str(workdir),
+        "retry_plan": str(plan_path),
+        "retry_plan_status": status,
+        "retry_request": str(retry_request),
+    }
+
+    if args.dry_plan or status in {"not_needed", "not_applicable"}:
+        result["status"] = "plan_only"
+        result["reason"] = plan.get("reason", "")
+        result["codex_image2_handoff"] = plan.get("codex_image2_handoff", "")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if not retry_request.exists():
+        raise FileNotFoundError(f"Missing Codex image2 retry request: {retry_request}")
+
+    if not args.skip_import:
+        result["import"] = import_latest_codex_image2_results(
+            retry_request,
+            codex_home=Path(args.codex_home) if args.codex_home else None,
+            after_timestamp=args.after_timestamp,
+            after_marker=Path(args.after_marker) if args.after_marker else None,
+            newest_first=bool(args.newest_first),
+        )
+
+    if args.import_only:
+        result["status"] = "imported"
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    options = _auto_scene_options_from_workdir(workdir, args)
+    summary = run_auto_scene(options)
+    result.update(
+        {
+            "status": summary["status"],
+            "auto_scene_summary": str(workdir / "auto_scene_summary.json"),
+            "white_model_position_lock": summary.get("white_model_position_lock", ""),
+            "final_position_retry_plan": summary.get("final_position_retry_plan", ""),
+        }
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if summary["status"] in {"complete", "needs_review"} else 2
+
+
 def cmd_auto_scene_audit_image2_flow(args: argparse.Namespace) -> int:
     report = audit_auto_scene_image2_flow(
         Path(args.workdir),
@@ -592,6 +686,35 @@ def build_parser() -> argparse.ArgumentParser:
     latest_image2_import.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
     latest_image2_import.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
     latest_image2_import.set_defaults(func=cmd_auto_scene_import_latest_image2)
+
+    position_retry = subparsers.add_parser(
+        "auto-scene-run-position-retry",
+        help="Import corrected Codex image2 position retry outputs and rerun the same Auto Scene workdir",
+    )
+    position_retry.add_argument("--workdir", required=True, help="Auto Scene workdir containing reports/final_position_retry_plan.json")
+    position_retry.add_argument("--request", help="Override the request if auto_task.json/auto_scene_summary.json cannot infer it")
+    position_retry.add_argument("--codex-home", help="Override CODEX_HOME when scanning generated_images")
+    position_retry.add_argument("--after-marker", help="Only import generated files newer than this marker file")
+    position_retry.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
+    position_retry.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
+    position_retry.add_argument("--dry-plan", action="store_true", help="Print the retry request and handoff without importing or rerunning")
+    position_retry.add_argument("--skip-import", action="store_true", help="Rerun without scanning/importing latest Codex image2 files")
+    position_retry.add_argument("--import-only", action="store_true", help="Import latest Codex image2 files into the retry request without rerunning")
+    position_retry.add_argument("--views", type=int, help="Override output view count for the rerun")
+    position_retry.add_argument("--quality", choices=["fast", "balanced", "high"], help="Override quality mode for the rerun")
+    position_retry.add_argument("--geometry", choices=["loose", "balanced", "strict"], help="Override geometry mode for the rerun")
+    position_retry.add_argument("--style", choices=["product", "cinematic", "ecommerce", "concept", "exhibition", "architecture"], help="Override style preset for the rerun")
+    position_retry.add_argument("--model-key")
+    position_retry.add_argument("--backend", help="Use mock for dry CPU validation")
+    position_retry.add_argument("--candidates", type=int, help="Override candidates per view for the rerun")
+    position_retry.add_argument("--max-retries", type=int, help="Override max retries for the rerun")
+    position_retry.add_argument("--seed", type=int, help="Override seed for the rerun")
+    position_retry.add_argument("--allow-procedural-fallback", action="store_true", default=True)
+    position_retry.add_argument("--dry-run", action="store_true", help="Use mock image, 3D, render, and AI backends on rerun")
+    position_retry.add_argument("--no-llm", action="store_true", help="Only for dry-run/mock validation; real Auto Scene requires the configured multimodal planner")
+    position_retry.add_argument("--render-backend", default="auto", choices=["auto", "procedural", "blender"], help="Render assembled scene channels with auto, procedural, or Blender backend")
+    position_retry.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
+    position_retry.set_defaults(func=cmd_auto_scene_run_position_retry)
 
     image2_audit = subparsers.add_parser("auto-scene-audit-image2-flow", help="Audit whether an Auto Scene workdir followed the qwen -> Codex image2 -> model review -> 3D AI flow")
     image2_audit.add_argument("--workdir", required=True, help="Auto Scene workdir containing auto_scene_summary.json")
