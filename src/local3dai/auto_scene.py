@@ -160,7 +160,7 @@ AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "ai_candidate_search", "purpose": "optionally run local final geometry-locked AI rendering from render_manifest channels"},
     {"name": "module_presence_scoring", "purpose": "score module presence and position adherence"},
     {"name": "concept_final_comparison", "purpose": "compare the final render against the global concept image and flag obvious quality failures"},
-    {"name": "white_model_position_lock", "purpose": "compare the final image against the Blender white-model hero view for screen-space layout drift"},
+    {"name": "white_model_position_lock", "purpose": "compare final view images against Blender white-model views for screen-space layout drift"},
     {"name": "final_position_retry_plan", "purpose": "write a Codex image2 retry handoff when the final image drifts from the white-model position contract"},
     {"name": "image2_flow_audit", "purpose": "audit that real Auto Scene runs used model planning, Codex image2 handoff, model review, and reviewed-reference 3D AI"},
     {"name": "package_scene_outputs", "purpose": "write final manifests, report, contact sheet, and summary"},
@@ -4791,6 +4791,18 @@ def _position_contract_by_view(position_contract_path: str | Path | None) -> dic
     return output
 
 
+def _render_views_by_id_from_position_contract(position_contract_path: str | Path | None) -> dict[str, dict[str, Any]]:
+    if not position_contract_path or not Path(position_contract_path).exists():
+        return {}
+    contract = read_manifest(position_contract_path)
+    render_manifest = str(contract.get("render_manifest") or "")
+    if not render_manifest or not Path(render_manifest).exists():
+        return {}
+    requested_views = max(1, int(contract.get("contract_count") or 1))
+    views = _render_view_requests(render_manifest, max_views=requested_views)
+    return {str(view.get("view_id") or ""): view for view in views if isinstance(view, dict)}
+
+
 def _position_contract_prompt_clause(contract: dict[str, Any]) -> str:
     if not contract:
         return ""
@@ -5557,30 +5569,41 @@ def _write_position_lock_overlay(
     return str(output)
 
 
-def create_white_model_position_lock_report(
+def _safe_view_file_stem(view_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(view_id or "view")).strip("._") or "view"
+
+
+def _compute_white_model_position_lock_view(
     *,
     final_image: str | Path,
     render_manifest: str | Path,
-    output_report: str | Path,
+    reference_view: dict[str, Any] | None,
     output_image: str | Path,
 ) -> dict[str, Any]:
-    hero = _render_hero_view(render_manifest)
-    files = dict(hero.get("files", {})) if hero else {}
+    files = dict(reference_view.get("files", {})) if reference_view else {}
     reference_rgb = str(files.get("rgb") or "")
     reference_mask_path = str(files.get("mask") or "")
     reference_edge_path = str(files.get("edge") or "")
-    report_path = Path(output_report)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    if not reference_rgb or not Path(reference_rgb).exists() or not Path(final_image).exists():
+    final_image_value = str(final_image or "")
+    final_exists = bool(final_image_value) and Path(final_image_value).exists() and Path(final_image_value).is_file()
+    reference_exists = bool(reference_rgb) and Path(reference_rgb).exists() and Path(reference_rgb).is_file()
+    if not reference_exists or not final_exists:
+        reasons = []
+        if not reference_exists:
+            reasons.append("missing_reference_image")
+        if not final_exists:
+            reasons.append("missing_final_image")
         report = {
-            "type": "white_model_position_lock",
+            "type": "white_model_position_lock_view",
             "status": "needs_review",
             "render_manifest": _absolute_artifact_path(render_manifest),
-            "final_image": _absolute_artifact_path(final_image),
-            "failure_reasons": ["missing_reference_or_final_image"],
+            "reference_view_id": str(reference_view.get("view_id", "")) if reference_view else "",
+            "reference_rgb": _absolute_artifact_path(reference_rgb),
+            "final_image": _absolute_artifact_path(final_image_value),
+            "overlay_image": "",
+            "failure_reasons": reasons,
             "metrics": {},
         }
-        write_manifest(report_path, report)
         return report
 
     size = (512, 512)
@@ -5621,10 +5644,10 @@ def create_white_model_position_lock_report(
         final_bbox=final_bbox,
     )
     report = {
-        "type": "white_model_position_lock",
+        "type": "white_model_position_lock_view",
         "status": "pass" if not failures else "needs_review",
         "render_manifest": _absolute_artifact_path(render_manifest),
-        "reference_view_id": str(hero.get("view_id", "")) if hero else "",
+        "reference_view_id": str(reference_view.get("view_id", "")) if reference_view else "",
         "reference_rgb": _absolute_artifact_path(reference_rgb),
         "reference_mask": _absolute_artifact_path(reference_mask_path),
         "reference_edge": _absolute_artifact_path(reference_edge_path),
@@ -5641,8 +5664,121 @@ def create_white_model_position_lock_report(
         "checks": checks,
         "failure_reasons": failures,
         "notes": [
-            "This report compares the final render to the selected white-model hero render in screen space.",
+            "This view report compares one final render to its white-model render in screen space.",
             "It is a lightweight gate for position, scale, silhouette, and edge drift before manual visual review.",
+        ],
+    }
+    return report
+
+
+def create_white_model_position_lock_report(
+    *,
+    final_image: str | Path,
+    render_manifest: str | Path,
+    output_report: str | Path,
+    output_image: str | Path,
+) -> dict[str, Any]:
+    report_path = Path(output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = _compute_white_model_position_lock_view(
+        final_image=final_image,
+        render_manifest=render_manifest,
+        reference_view=_render_hero_view(render_manifest),
+        output_image=output_image,
+    )
+    report["type"] = "white_model_position_lock"
+    report["mode"] = "single_hero_view"
+    write_manifest(report_path, report)
+    return report
+
+
+def create_white_model_multiview_position_lock_report(
+    *,
+    final_view_images: Mapping[str, str | Path],
+    render_manifest: str | Path,
+    output_report: str | Path,
+    output_image: str | Path,
+    fallback_final_image: str | Path | None = None,
+) -> dict[str, Any]:
+    report_path = Path(output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_image)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized_final_images = {
+        str(view_id): str(path)
+        for view_id, path in dict(final_view_images or {}).items()
+        if str(view_id) and str(path)
+    }
+    if fallback_final_image and "view_hero" not in normalized_final_images:
+        normalized_final_images["view_hero"] = str(fallback_final_image)
+
+    manifest = read_manifest(render_manifest)
+    render_view_count = len([view for view in manifest.get("views", []) if isinstance(view, dict)])
+    render_views = _render_view_requests(render_manifest, max_views=max(1, render_view_count, len(normalized_final_images)))
+    render_views_by_id = {str(view.get("view_id") or ""): view for view in render_views if isinstance(view, dict)}
+    expected_view_ids = [str(view.get("view_id") or "") for view in render_views if str(view.get("view_id") or "")]
+    for view_id in normalized_final_images:
+        if view_id not in expected_view_ids:
+            expected_view_ids.append(view_id)
+
+    view_reports: list[dict[str, Any]] = []
+    overlay_items: list[tuple[str, str | Path]] = []
+    per_view_dir = output_path.parent / f"{output_path.stem}_views"
+    per_view_dir.mkdir(parents=True, exist_ok=True)
+    for view_id in expected_view_ids:
+        reference_view = render_views_by_id.get(view_id)
+        if reference_view is None and view_id == "view_hero":
+            reference_view = render_views_by_id.get("view_locked")
+        final_path = normalized_final_images.get(view_id, "")
+        view_output = per_view_dir / f"{_safe_view_file_stem(view_id)}.png"
+        view_report = _compute_white_model_position_lock_view(
+            final_image=final_path,
+            render_manifest=render_manifest,
+            reference_view=reference_view,
+            output_image=view_output,
+        )
+        view_report["view_id"] = view_id
+        view_reports.append(view_report)
+        if view_report.get("overlay_image"):
+            overlay_items.append((view_id, str(view_report["overlay_image"])))
+
+    overlay = _write_labeled_contact_sheet(overlay_items, output_path, panel_size=(640, 330))
+    totals = [
+        float(dict(report.get("metrics", {})).get("total", 0.0))
+        for report in view_reports
+        if isinstance(report.get("metrics"), dict) and "total" in report.get("metrics", {})
+    ]
+    failed_views = [str(report.get("view_id") or report.get("reference_view_id") or "") for report in view_reports if report.get("status") != "pass"]
+    failure_reasons = []
+    for report in view_reports:
+        for reason in report.get("failure_reasons", []) or []:
+            failure_reasons.append(f"{report.get('view_id') or report.get('reference_view_id')}: {reason}")
+    status = "pass" if view_reports and not failed_views else "needs_review"
+    report = {
+        "type": "white_model_position_lock",
+        "mode": "multiview",
+        "status": status,
+        "render_manifest": _absolute_artifact_path(render_manifest),
+        "final_view_images": {view_id: _absolute_artifact_path(path) for view_id, path in normalized_final_images.items()},
+        "overlay_image": _absolute_artifact_path(overlay),
+        "view_count": len(view_reports),
+        "checked_view_ids": [str(report.get("view_id") or "") for report in view_reports],
+        "failed_views": failed_views,
+        "view_reports": view_reports,
+        "metrics": {
+            "total": round(float(sum(totals) / max(1, len(totals))), 6),
+            "min_total": round(float(min(totals)) if totals else 0.0, 6),
+            "pass_rate": round(float((len(view_reports) - len(failed_views)) / max(1, len(view_reports))), 6),
+        },
+        "checks": {
+            "all_views_present": all("missing_final_image" not in (report.get("failure_reasons") or []) for report in view_reports),
+            "all_views_pass": not failed_views,
+        },
+        "failure_reasons": failure_reasons,
+        "notes": [
+            "This report aggregates per-view white-model position locks for final view images.",
+            "The overall status only passes when every rendered view has a matching final image and passes screen-space layout checks.",
         ],
     }
     write_manifest(report_path, report)
@@ -5705,6 +5841,46 @@ def create_final_position_retry_plan(
         return report
 
     contracts_by_view = _position_contract_by_view(position_contract_path)
+    render_views_by_id = _render_views_by_id_from_position_contract(position_contract_path)
+    existing_request_views = {str(item.get("view_id") or "") for item in original_requests}
+    for view_id, contract in contracts_by_view.items():
+        if not view_id or view_id in existing_request_views:
+            continue
+        render_view = render_views_by_id.get(view_id)
+        input_images = _final_image_reference_inputs(render_view or {})
+        if not input_images:
+            continue
+        prompt = _codex_image2_final_prompt(
+            "Render a polished production image from the assembled 3D white-model scene while preserving the white-model layout exactly.",
+            view_id=view_id,
+        )
+        contract_clause = _position_contract_prompt_clause(contract)
+        if contract_clause:
+            prompt = f"{prompt}\n\n{contract_clause}"
+        original_requests.append(
+            {
+                "view_id": view_id,
+                "source_render_view_id": str((render_view or {}).get("view_id") or view_id),
+                "kind": "final_render",
+                "provider": "codex_builtin_image2",
+                "output_path": _absolute_artifact_path(final_dir / _final_output_filename(view_id)),
+                "prompt": prompt,
+                "input_images": input_images,
+                "position_lock_contract": contract,
+                "position_lock": {
+                    "primary_reference_role": "white_model_rgb_position_lock",
+                    "policy": "retry_request_augmented_from_white_model_position_contract",
+                    "contract_source": _absolute_artifact_path(position_contract_path),
+                },
+                "style_policy": {
+                    "style_source": "generic_final_render_prompt",
+                    "planning_images_excluded_from_final_inputs": [],
+                },
+            }
+        )
+        existing_request_views.add(view_id)
+
+    final_view_images_for_retry = dict(white_lock_report.get("final_view_images", {})) if isinstance(white_lock_report.get("final_view_images"), dict) else {}
     retry_requests: list[dict[str, Any]] = []
     for index, item in enumerate(original_requests, start=1):
         view_id = str(item.get("view_id") or f"view_{index}")
@@ -5733,7 +5909,7 @@ def create_final_position_retry_plan(
                 "failure_reasons": white_lock_report.get("failure_reasons", []),
             },
             "position_lock_contract": contract,
-            "previous_final_image": white_lock_report.get("final_image", ""),
+            "previous_final_image": final_view_images_for_retry.get(view_id, white_lock_report.get("final_image", "")),
         }
         retry_requests.append(retry_item)
 
@@ -6338,12 +6514,13 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     concept_final_comparison_path = workdir / "reports" / "concept_final_comparison.json"
     white_model_position_lock = tool_executor.run(
         "white_model_position_lock",
-        {"final_image": str(final_image), "render_manifest": str(render_manifest_path)},
-        lambda: create_white_model_position_lock_report(
-            final_image=final_image,
+        {"final_view_images": final_view_images, "render_manifest": str(render_manifest_path)},
+        lambda: create_white_model_multiview_position_lock_report(
+            final_view_images=final_view_images,
             render_manifest=render_manifest_path,
             output_report=workdir / "reports" / "white_model_position_lock.json",
             output_image=final_dir / "white_position_lock_overlay.png",
+            fallback_final_image=final_image,
         ),
     )
     white_model_position_lock_path = workdir / "reports" / "white_model_position_lock.json"

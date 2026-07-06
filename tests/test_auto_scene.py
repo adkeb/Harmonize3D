@@ -22,6 +22,7 @@ from local3dai.auto_scene import (
     call_model_scene_planner,
     create_concept_final_comparison,
     create_final_position_retry_plan,
+    create_white_model_multiview_position_lock_report,
     create_white_model_position_lock_report,
     create_white_model_position_contract,
     generate_concept_image,
@@ -1642,6 +1643,52 @@ class AutoSceneTest(unittest.TestCase):
             )
             self.assertEqual(shifted_report["status"], "needs_review")
             self.assertIn("center_alignment", shifted_report["failure_reasons"])
+
+    def test_multiview_position_lock_fails_when_side_view_drifts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            views = []
+            final_view_images = {}
+            for index, view_id in enumerate(("view_hero", "view_left_30", "view_right_30")):
+                view_dir = root / "renders" / view_id
+                view_dir.mkdir(parents=True)
+                rect = (28 + index * 2, 44, 108 + index * 2, 92)
+                rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(rgb).rectangle(rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                rgb_path = view_dir / "rgb.png"
+                rgb.save(rgb_path)
+                mask = Image.new("L", (128, 128), 0)
+                ImageDraw.Draw(mask).rectangle(rect, fill=255)
+                mask_path = view_dir / "mask.png"
+                mask.convert("RGB").save(mask_path)
+                edge = Image.new("L", (128, 128), 0)
+                ImageDraw.Draw(edge).rectangle(rect, outline=255, width=3)
+                edge_path = view_dir / "edge.png"
+                edge.convert("RGB").save(edge_path)
+                views.append({"view_id": view_id, "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}})
+
+                final = root / "final" / f"final_{view_id}.png"
+                final.parent.mkdir(parents=True, exist_ok=True)
+                final_img = Image.new("RGB", (128, 128), (34, 36, 40))
+                final_rect = rect if view_id != "view_left_30" else (70, 12, 124, 54)
+                ImageDraw.Draw(final_img).rectangle(final_rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                final_img.save(final)
+                final_view_images[view_id] = str(final)
+
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": views})
+            report = create_white_model_multiview_position_lock_report(
+                final_view_images=final_view_images,
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_lock.json",
+                output_image=root / "final" / "white_position_lock_overlay.png",
+            )
+
+            self.assertEqual(report["mode"], "multiview")
+            self.assertEqual(report["status"], "needs_review")
+            self.assertIn("view_left_30", report["failed_views"])
+            self.assertEqual(report["view_count"], 3)
+            self.assertLess(report["metrics"]["pass_rate"], 1.0)
+            self.assertTrue(Path(report["overlay_image"]).exists())
 
     def test_final_position_retry_plan_uses_white_model_channels_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

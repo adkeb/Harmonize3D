@@ -13,8 +13,8 @@ from .auto_scene import (
     AutoSceneOptions,
     audit_auto_scene_image2_flow,
     create_final_position_retry_plan,
+    create_white_model_multiview_position_lock_report,
     create_white_model_position_contract,
-    create_white_model_position_lock_report,
     import_codex_image2_result,
     import_latest_codex_image2_results,
     run_auto_scene,
@@ -405,6 +405,19 @@ def _infer_auto_scene_views(summary: dict[str, Any], auto_task: dict[str, Any], 
     return 3
 
 
+def _resolve_final_view_images(workdir: Path, summary: dict[str, Any], final_image: Path) -> dict[str, str]:
+    final_view_images: dict[str, str] = {}
+    raw = summary.get("final_view_images", {})
+    if isinstance(raw, dict):
+        for view_id, path in raw.items():
+            resolved = _resolve_workdir_artifact(workdir, path, final_image)
+            if resolved.exists():
+                final_view_images[str(view_id)] = str(resolved)
+    if final_image.exists() and "view_hero" not in final_view_images:
+        final_view_images["view_hero"] = str(final_image)
+    return final_view_images
+
+
 def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir).expanduser().resolve()
     summary_path = workdir / "auto_scene_summary.json"
@@ -422,7 +435,8 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
     final_dir = workdir / "final"
     reports_dir.mkdir(parents=True, exist_ok=True)
     final_dir.mkdir(parents=True, exist_ok=True)
-    output_views = _infer_auto_scene_views(summary, auto_task, args)
+    render_view_count = len([view for view in read_manifest(render_manifest).get("views", []) if isinstance(view, dict)])
+    output_views = max(_infer_auto_scene_views(summary, auto_task, args), render_view_count)
     position_contract_path = _resolve_workdir_artifact(
         workdir,
         args.position_contract or summary.get("white_model_position_contract"),
@@ -442,11 +456,13 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
         output_image=final_dir / "white_position_contract_overlay.png",
         output_views=output_views,
     )
-    position_lock = create_white_model_position_lock_report(
-        final_image=final_image,
+    final_view_images = _resolve_final_view_images(workdir, summary, final_image)
+    position_lock = create_white_model_multiview_position_lock_report(
+        final_view_images=final_view_images,
         render_manifest=render_manifest,
         output_report=position_lock_path,
         output_image=final_dir / "white_position_lock_overlay.png",
+        fallback_final_image=final_image,
     )
     retry_plan = create_final_position_retry_plan(
         workdir=workdir,

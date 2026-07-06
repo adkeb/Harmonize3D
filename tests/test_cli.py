@@ -179,6 +179,54 @@ class AutoSceneCliTest(unittest.TestCase):
             summary = read_manifest(root / "auto_scene_summary.json")
             self.assertEqual(summary["capabilities"]["final_position_retry_plan"]["status"], "awaiting_codex_image2_retry")
 
+    def test_auto_scene_plan_position_retry_detects_missing_side_view_finals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            views = []
+            for offset, view_id in enumerate(("view_hero", "view_left_30", "view_right_30")):
+                view_dir = root / "renders" / view_id
+                view_dir.mkdir(parents=True)
+                files = {}
+                for channel in ("rgb", "edge", "mask", "depth", "normal"):
+                    path = view_dir / f"{channel}.png"
+                    image = Image.new("RGB", (128, 128), (34, 36, 40))
+                    ImageDraw.Draw(image).rectangle((24 + offset * 3, 42, 106 + offset * 3, 92), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                    image.save(path)
+                    files[channel] = str(path)
+                views.append({"view_id": view_id, "files": files})
+            final_image = root / "final" / "final_view_hero.png"
+            final_image.parent.mkdir(parents=True, exist_ok=True)
+            hero = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(hero).rectangle((24, 42, 106, 92), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            hero.save(final_image)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": views})
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "type": "auto_scene_summary",
+                    "status": "needs_review",
+                    "workdir": str(root),
+                    "render_manifest": str(render_manifest),
+                    "final_image": str(final_image),
+                    "final_view_images": {"view_hero": str(final_image)},
+                    "capabilities": {},
+                },
+            )
+
+            code, result = self._run_cli(["auto-scene-plan-position-retry", "--workdir", str(root)])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(result["white_model_position_lock_status"], "needs_review")
+            self.assertEqual(result["retry_plan_status"], "awaiting_codex_image2_retry")
+            lock_report = read_manifest(root / "reports" / "white_model_position_lock.json")
+            self.assertEqual(lock_report["mode"], "multiview")
+            self.assertIn("view_left_30", lock_report["failed_views"])
+            self.assertIn("view_right_30", lock_report["failed_views"])
+            retry_request = read_manifest(result["retry_request"])
+            self.assertEqual(retry_request["request_count"], 3)
+            self.assertEqual([item["view_id"] for item in retry_request["requests"]], ["view_hero", "view_left_30", "view_right_30"])
+            self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     unittest.main()
