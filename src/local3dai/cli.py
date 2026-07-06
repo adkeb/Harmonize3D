@@ -15,6 +15,7 @@ from .auto_scene import (
     create_final_position_retry_plan,
     create_white_model_multiview_position_lock_report,
     create_white_model_position_contract,
+    fit_final_images_to_white_model_positions,
     import_codex_image2_result,
     import_latest_codex_image2_results,
     run_auto_scene,
@@ -514,6 +515,63 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
     return 0 if retry_plan.get("status") in {"awaiting_codex_image2_retry", "not_needed"} or args.allow_not_applicable else 2
 
 
+def cmd_auto_scene_fit_position_lock(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir).expanduser().resolve()
+    summary_path = workdir / "auto_scene_summary.json"
+    summary = _read_manifest_if_exists(summary_path)
+    render_manifest = _resolve_workdir_artifact(workdir, args.render_manifest or summary.get("render_manifest"), workdir / "renders" / "render_manifest.json")
+    final_image = _resolve_workdir_artifact(workdir, args.final_image or summary.get("final_image"), workdir / "final" / "final_view_hero.png")
+    if not render_manifest.exists():
+        raise FileNotFoundError(f"Missing Auto Scene render manifest: {render_manifest}")
+    if not final_image.exists():
+        raise FileNotFoundError(f"Missing Auto Scene final image: {final_image}")
+
+    final_view_images = _resolve_final_view_images(workdir, summary, final_image)
+    if not final_view_images:
+        raise FileNotFoundError("No final view images found to fit against the white-model render channels.")
+
+    reports_dir = workdir / "reports"
+    final_dir = workdir / "final"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    output_report = _resolve_workdir_artifact(workdir, args.output_report, reports_dir / "white_model_position_fit.json")
+    output_dir = _resolve_workdir_artifact(workdir, args.output_dir, final_dir / "position_fitted") if args.output_dir else final_dir / "position_fitted"
+    fit_report = fit_final_images_to_white_model_positions(
+        final_view_images=final_view_images,
+        render_manifest=render_manifest,
+        output_report=output_report,
+        output_dir=output_dir,
+        in_place=bool(args.in_place),
+    )
+
+    if summary and not args.no_summary_update:
+        summary["white_model_position_fit"] = str(output_report)
+        if not args.in_place and isinstance(fit_report.get("output_view_images"), dict):
+            summary["final_view_images"] = dict(fit_report["output_view_images"])
+            if fit_report["output_view_images"].get("view_hero"):
+                summary["final_image"] = fit_report["output_view_images"]["view_hero"]
+        capabilities = summary.setdefault("capabilities", {})
+        if isinstance(capabilities, dict):
+            capabilities["white_model_position_fit"] = {
+                "enabled": True,
+                "status": fit_report.get("status", ""),
+                "view_count": fit_report.get("view_count", 0),
+            }
+        write_manifest(summary_path, summary)
+
+    result = {
+        "status": fit_report.get("status", ""),
+        "workdir": str(workdir),
+        "render_manifest": str(render_manifest),
+        "white_model_position_fit": str(output_report),
+        "mode": fit_report.get("mode", ""),
+        "failed_views": fit_report.get("failed_views", []),
+        "output_view_images": fit_report.get("output_view_images", {}),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if fit_report.get("status") == "pass" or args.allow_fail else 2
+
+
 def cmd_auto_scene_run_position_retry(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir).expanduser().resolve()
     plan_path = workdir / "reports" / "final_position_retry_plan.json"
@@ -826,6 +884,20 @@ def build_parser() -> argparse.ArgumentParser:
     latest_image2_import.add_argument("--after-timestamp", type=float, help="Only import generated files newer than this Unix timestamp")
     latest_image2_import.add_argument("--newest-first", action="store_true", help="Map newest files to request order instead of oldest-newer files to request order")
     latest_image2_import.set_defaults(func=cmd_auto_scene_import_latest_image2)
+
+    position_fit = subparsers.add_parser(
+        "auto-scene-fit-position-lock",
+        help="Fit imported Codex image2 final renders to the white-model screen-space bbox before verification",
+    )
+    position_fit.add_argument("--workdir", required=True, help="Existing Auto Scene workdir with renders/render_manifest.json and final view images")
+    position_fit.add_argument("--render-manifest", help="Override render_manifest path")
+    position_fit.add_argument("--final-image", help="Override final image path")
+    position_fit.add_argument("--output-report", help="Override output path for reports/white_model_position_fit.json")
+    position_fit.add_argument("--output-dir", help="Output directory for fitted final view copies")
+    position_fit.add_argument("--in-place", action="store_true", help="Overwrite final view images after backing up originals under final/position_fit_originals")
+    position_fit.add_argument("--no-summary-update", action="store_true", help="Do not write fit artifact paths back into auto_scene_summary.json")
+    position_fit.add_argument("--allow-fail", action="store_true", help="Return exit code 0 even when fitting cannot process every view")
+    position_fit.set_defaults(func=cmd_auto_scene_fit_position_lock)
 
     position_retry_plan = subparsers.add_parser(
         "auto-scene-plan-position-retry",

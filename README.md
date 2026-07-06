@@ -200,6 +200,17 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
   --workdir outputs/auto_scene/demo_showroom
 ```
 
+If prompt-only Codex image2 retries still drift from the white-model screen-space layout, run the generic post-image2 fit step before replanning. This does not create a view-specific hard-coded render; it reads each view's white-model mask bbox and the imported image2 foreground bbox, then scales/translates the final image foreground into the white-model bbox before the normal multiview position-lock verifier runs:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-fit-position-lock \
+  --workdir outputs/auto_scene/demo_showroom \
+  --in-place
+
+PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-plan-position-retry \
+  --workdir outputs/auto_scene/demo_showroom
+```
+
 Use `--dry-plan` to print the retry request and handoff without changing files, or `--import-only` when you only want to copy the latest Codex image2 outputs into the retry request before a manual rerun.
 
 If an older/local run produced a final image without `final/codex_image2_final_request.json`, the retry planner now synthesizes that missing request from `reports/white_model_position_contract.json` and `renders/render_manifest.json`, keeping only white-model render channels as final image2 inputs. Synthesized requests keep separate output paths per view, so side-view retries do not overwrite `final/final_view_hero.png`.

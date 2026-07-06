@@ -5722,6 +5722,169 @@ def _compute_white_model_position_lock_view(
     return report
 
 
+def _bbox_to_pixels(bbox: list[float] | None, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    if not bbox or len(bbox) != 4:
+        return None
+    width, height = size
+    x0, y0, x1, y1 = [float(value) for value in bbox]
+    left = max(0, min(width - 1, int(math.floor(x0 * width))))
+    top = max(0, min(height - 1, int(math.floor(y0 * height))))
+    right = max(left + 1, min(width, int(math.ceil(x1 * width))))
+    bottom = max(top + 1, min(height, int(math.ceil(y1 * height))))
+    return left, top, right, bottom
+
+
+def _border_median_rgb(path: str | Path, *, border_px: int = 16) -> tuple[int, int, int]:
+    image = Image.open(path).convert("RGB")
+    arr = np.asarray(image, dtype=np.float32)
+    border = min(border_px, max(1, image.width // 8), max(1, image.height // 8))
+    samples = np.concatenate(
+        [
+            arr[:border, :, :].reshape(-1, 3),
+            arr[-border:, :, :].reshape(-1, 3),
+            arr[:, :border, :].reshape(-1, 3),
+            arr[:, -border:, :].reshape(-1, 3),
+        ],
+        axis=0,
+    )
+    rgb = np.median(samples, axis=0)
+    return tuple(int(max(0, min(255, round(float(value))))) for value in rgb)
+
+
+def _fit_image_foreground_bbox(
+    *,
+    final_image: str | Path,
+    output_image: str | Path,
+    source_bbox: list[float] | None,
+    target_bbox: list[float] | None,
+) -> bool:
+    image = Image.open(final_image).convert("RGB")
+    source_box = _bbox_to_pixels(source_bbox, image.size)
+    target_box = _bbox_to_pixels(target_bbox, image.size)
+    if source_box is None or target_box is None:
+        return False
+    crop = image.crop(source_box)
+    target_width = max(1, target_box[2] - target_box[0])
+    target_height = max(1, target_box[3] - target_box[1])
+    fitted = crop.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", image.size, _border_median_rgb(final_image))
+    canvas.paste(fitted, (target_box[0], target_box[1]))
+    output_path = Path(output_image)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path)
+    return True
+
+
+def fit_final_images_to_white_model_positions(
+    *,
+    final_view_images: Mapping[str, str | Path],
+    render_manifest: str | Path,
+    output_report: str | Path,
+    output_dir: str | Path | None = None,
+    in_place: bool = False,
+) -> dict[str, Any]:
+    """Scale and translate image2 final renders so their foreground bbox matches the white-model view bbox."""
+
+    report_path = Path(output_report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = read_manifest(render_manifest)
+    render_view_count = len([view for view in manifest.get("views", []) if isinstance(view, dict)])
+    render_views = _render_view_requests(render_manifest, max_views=max(1, render_view_count, len(final_view_images or {})))
+    render_views_by_id = {str(view.get("view_id") or ""): view for view in render_views if isinstance(view, dict)}
+    expected_view_ids = [str(view.get("view_id") or "") for view in render_views if str(view.get("view_id") or "")]
+    for view_id in dict(final_view_images or {}):
+        if str(view_id) not in expected_view_ids:
+            expected_view_ids.append(str(view_id))
+
+    fitted_dir = Path(output_dir) if output_dir else report_path.parent.parent / "final" / "position_fitted"
+    backup_dir = report_path.parent.parent / "final" / "position_fit_originals"
+    items: list[dict[str, Any]] = []
+    output_view_images: dict[str, str] = {}
+
+    for view_id in expected_view_ids:
+        source_path = Path(str(dict(final_view_images or {}).get(view_id, ""))).expanduser()
+        reference_view = render_views_by_id.get(view_id)
+        if reference_view is None and view_id == "view_hero":
+            reference_view = render_views_by_id.get("view_locked")
+        files = dict(reference_view.get("files", {})) if reference_view else {}
+        reference_rgb = str(files.get("rgb") or "")
+        reference_mask_path = str(files.get("mask") or "")
+        reasons: list[str] = []
+        if not source_path.exists():
+            reasons.append("missing_final_image")
+        if not reference_rgb or not Path(reference_rgb).exists():
+            reasons.append("missing_reference_image")
+
+        output_path = source_path if in_place else fitted_dir / f"{_safe_view_file_stem(view_id)}.png"
+        item: dict[str, Any] = {
+            "view_id": view_id,
+            "source_image": _absolute_artifact_path(source_path),
+            "output_image": _absolute_artifact_path(output_path),
+            "reference_rgb": _absolute_artifact_path(reference_rgb),
+            "reference_mask": _absolute_artifact_path(reference_mask_path),
+            "status": "needs_review",
+            "failure_reasons": reasons,
+        }
+        if reasons:
+            items.append(item)
+            continue
+
+        size = (512, 512)
+        reference_mask = _mask_from_channel(reference_mask_path, size=size) if reference_mask_path and Path(reference_mask_path).exists() else _foreground_mask_from_rgb(reference_rgb, size=size)
+        final_mask = _foreground_mask_from_rgb(source_path, size=size)
+        reference_bbox = _binary_bbox(reference_mask)
+        final_bbox = _binary_bbox(final_mask)
+        item["reference_bbox"] = reference_bbox
+        item["original_final_bbox"] = final_bbox
+        item["metrics_before"] = _bbox_metrics(reference_bbox, final_bbox)
+
+        if in_place:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_dir / f"{_safe_view_file_stem(view_id)}.png"
+            if not backup_path.exists():
+                shutil.copy2(source_path, backup_path)
+            item["backup_image"] = _absolute_artifact_path(backup_path)
+
+        fitted = _fit_image_foreground_bbox(
+            final_image=source_path,
+            output_image=output_path,
+            source_bbox=final_bbox,
+            target_bbox=reference_bbox,
+        )
+        if not fitted:
+            item["failure_reasons"] = ["missing_bbox"]
+            items.append(item)
+            continue
+
+        fitted_mask = _foreground_mask_from_rgb(output_path, size=size)
+        fitted_bbox = _binary_bbox(fitted_mask)
+        item["fitted_final_bbox"] = fitted_bbox
+        item["metrics_after"] = _bbox_metrics(reference_bbox, fitted_bbox)
+        item["status"] = "pass"
+        item["failure_reasons"] = []
+        output_view_images[view_id] = str(output_path)
+        items.append(item)
+
+    failed = [item["view_id"] for item in items if item.get("status") != "pass"]
+    report = {
+        "type": "white_model_position_fit",
+        "status": "pass" if items and not failed else "needs_review",
+        "render_manifest": _absolute_artifact_path(render_manifest),
+        "mode": "in_place" if in_place else "copy",
+        "output_dir": _absolute_artifact_path(fitted_dir),
+        "output_view_images": {view_id: _absolute_artifact_path(path) for view_id, path in output_view_images.items()},
+        "view_count": len(items),
+        "failed_views": failed,
+        "items": items,
+        "notes": [
+            "This is a generic post-image2 position fitting step.",
+            "It scales/translates the final image foreground bbox to the matching white-model bbox before the normal position lock verifier runs.",
+        ],
+    }
+    write_manifest(report_path, report)
+    return report
+
+
 def create_white_model_position_lock_report(
     *,
     final_image: str | Path,

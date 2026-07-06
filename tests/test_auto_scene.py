@@ -27,6 +27,7 @@ from local3dai.auto_scene import (
     create_white_model_multiview_position_lock_report,
     create_white_model_position_lock_report,
     create_white_model_position_contract,
+    fit_final_images_to_white_model_positions,
     generate_concept_image,
     generate_codex_image2_final_render,
     generate_model_module_plan,
@@ -1661,6 +1662,54 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIsNotNone(bbox)
             self.assertLess(float(mask.mean()), 0.5)
             self.assertEqual(bbox, [0.234375, 0.328125, 0.789062, 0.710938])
+
+    def test_fit_final_image_to_white_model_position_restores_bbox_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_left_30"
+            view_dir.mkdir(parents=True)
+            rect = (20, 48, 112, 112)
+            rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(rgb).rectangle(rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).rectangle(rect, fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            edge = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(edge).rectangle(rect, outline=255, width=3)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            render_manifest = write_manifest(
+                root / "renders" / "render_manifest.json",
+                {"views": [{"view_id": "view_left_30", "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}}]},
+            )
+
+            final = root / "final" / "drifted.png"
+            final.parent.mkdir(parents=True)
+            final_img = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(final_img).rectangle((2, 4, 126, 78), fill=(235, 237, 240), outline=(80, 150, 230), width=3)
+            final_img.save(final)
+
+            fit = fit_final_images_to_white_model_positions(
+                final_view_images={"view_left_30": final},
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_fit.json",
+                output_dir=root / "final" / "position_fitted",
+            )
+            self.assertEqual(fit["status"], "pass")
+            fitted = Path(fit["output_view_images"]["view_left_30"])
+            self.assertTrue(fitted.exists())
+
+            lock = create_white_model_multiview_position_lock_report(
+                final_view_images={"view_left_30": fitted},
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_lock.json",
+                output_image=root / "final" / "white_position_lock_overlay.png",
+            )
+            self.assertEqual(lock["status"], "pass")
+            self.assertGreaterEqual(lock["view_reports"][0]["metrics"]["center_alignment"], 0.9)
 
     def test_multiview_position_lock_fails_when_side_view_drifts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
