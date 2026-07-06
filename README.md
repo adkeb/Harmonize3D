@@ -24,7 +24,7 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally recorded as `needs_review`, not `pass`, because the full three-view scene has not been re-rendered end to end after the retry pass. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 hero retry now preserves the white-model hero position: `white_model_position_lock` passes with total `0.708514`, the concept/final comparison passes, and `final_position_retry_plan` reports `not_needed` for the hero view. The retry planner now preserves all final-render request views instead of only the hero request, and `white_model_position_lock` has been upgraded to a per-view aggregate check, so missing or drifting left/right final views force a new Codex image2 position-retry handoff. The remaining engineering target is running the complete multi-view Auto Scene package with corrected side-view outputs and validating the resulting contact sheet.
+Current status is intentionally tracked through per-stage reports instead of a single unchecked success label. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 retry path now preserves all final-render request views instead of only the hero request. A generic `white_model_position_fit` stage post-fits imported image2 final renders to each Blender white-model screen-space bbox before the normal multiview `white_model_position_lock` verifier runs. On the current three-view workdir, `white_model_position_fit` passes, `white_model_position_lock` passes with pass rate `1.0`, and `final_position_retry_plan` reports `not_needed`. The remaining engineering target is running a fresh full real Auto Scene job end to end with the automatic fit stage enabled and using that run as the next paper-quality package.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
@@ -200,7 +200,7 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
   --workdir outputs/auto_scene/demo_showroom
 ```
 
-If prompt-only Codex image2 retries still drift from the white-model screen-space layout, run the generic post-image2 fit step before replanning. This does not create a view-specific hard-coded render; it reads each view's white-model mask bbox and the imported image2 foreground bbox, then scales/translates the final image foreground into the white-model bbox before the normal multiview position-lock verifier runs:
+The main Auto Scene packaging path now runs the same generic post-image2 fit stage before final verification. For older workdirs or manual Codex image2 imports, run it explicitly before replanning. This does not create a view-specific hard-coded render; it reads each view's white-model mask bbox and the imported image2 foreground bbox, then scales/translates the final image foreground into the white-model bbox before the normal multiview position-lock verifier runs:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-fit-position-lock \
@@ -256,6 +256,7 @@ outputs/auto_scene/<task>/
   reports/structure_scores.json
   reports/multiview_score.json
   reports/stages.json
+  reports/white_model_position_fit.json
   reports/white_model_position_lock.json
   reports/final_position_retry_plan.json
   reports/image2_flow_audit.json

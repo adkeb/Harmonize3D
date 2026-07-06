@@ -2062,6 +2062,7 @@ class AutoSceneTest(unittest.TestCase):
                 "tool_calls",
                 "concept_final_comparison",
                 "concept_vs_final",
+                "white_model_position_fit",
                 "white_model_position_lock",
                 "white_position_lock_overlay",
                 "final_position_retry_plan",
@@ -2087,6 +2088,9 @@ class AutoSceneTest(unittest.TestCase):
             white_lock = read_manifest(summary["white_model_position_lock"])
             self.assertIn(white_lock["status"], {"pass", "needs_review"})
             self.assertIn("total", white_lock["metrics"])
+            position_fit = read_manifest(summary["white_model_position_fit"])
+            self.assertIn(position_fit["status"], {"pass", "needs_review"})
+            self.assertEqual(summary["capabilities"]["white_model_position_fit"]["status"], position_fit["status"])
             self.assertEqual(summary["capabilities"]["white_model_position_lock"]["status"], white_lock["status"])
             stages = read_manifest(summary["stages"])
             self.assertEqual(stages["type"], "auto_scene_stages")
@@ -2129,6 +2133,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("structure_scores", by_id["score"]["artifacts"])
             self.assertIn("multiview_score", by_id["score"]["artifacts"])
             self.assertIn("multiview_score", by_id["consistency"]["artifacts"])
+            self.assertIn("white_model_position_fit", by_id["package"]["artifacts"])
             self.assertIn("white_model_position_lock", by_id["package"]["artifacts"])
             self.assertIn("final_position_retry_plan", by_id["package"]["artifacts"])
             module_plan = read_manifest(summary["module_plan"])

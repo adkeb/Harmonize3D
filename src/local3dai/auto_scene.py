@@ -98,6 +98,7 @@ AUTO_SCENE_STAGE_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
         "visual_judgement",
         "concept_final_comparison",
         "concept_vs_final",
+        "white_model_position_fit",
         "white_model_position_lock",
         "white_position_lock_overlay",
         "final_position_retry_plan",
@@ -160,6 +161,7 @@ AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "ai_candidate_search", "purpose": "optionally run local final geometry-locked AI rendering from render_manifest channels"},
     {"name": "module_presence_scoring", "purpose": "score module presence and position adherence"},
     {"name": "concept_final_comparison", "purpose": "compare the final render against the global concept image and flag obvious quality failures"},
+    {"name": "white_model_position_fit", "purpose": "post-fit final image2 foreground bbox to the white-model screen-space bbox before final position verification"},
     {"name": "white_model_position_lock", "purpose": "compare final view images against Blender white-model views for screen-space layout drift"},
     {"name": "final_position_retry_plan", "purpose": "write a Codex image2 retry handoff when the final image drifts from the white-model position contract"},
     {"name": "image2_flow_audit", "purpose": "audit that real Auto Scene runs used model planning, Codex image2 handoff, model review, and reviewed-reference 3D AI"},
@@ -6693,6 +6695,35 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     for view_id, source in dict(agent_summary.get("final_view_images", {})).items():
         target_name = f"final_{view_id}.png"
         final_view_images[str(view_id)] = _copy_or_blank(source, final_dir / target_name)
+    if final_image and Path(final_image).exists() and "view_hero" not in final_view_images:
+        final_view_images["view_hero"] = final_image
+    white_model_position_fit = tool_executor.run(
+        "white_model_position_fit",
+        {"final_view_images": final_view_images, "render_manifest": str(render_manifest_path), "mode": "in_place"},
+        lambda: fit_final_images_to_white_model_positions(
+            final_view_images=final_view_images,
+            render_manifest=render_manifest_path,
+            output_report=workdir / "reports" / "white_model_position_fit.json",
+            output_dir=final_dir / "position_fitted",
+            in_place=True,
+        ),
+    )
+    if isinstance(white_model_position_fit.get("output_view_images"), dict) and white_model_position_fit["output_view_images"]:
+        final_view_images = {str(view_id): str(path) for view_id, path in white_model_position_fit["output_view_images"].items()}
+        if final_view_images.get("view_hero"):
+            final_image = final_view_images["view_hero"]
+    hero_view = _render_hero_view(render_manifest_path) or {}
+    hero_rgb = str(dict(hero_view.get("files", {})).get("rgb") or "")
+    comparison_image = _write_labeled_contact_sheet(
+        [("White model reference", hero_rgb), ("Final render", final_image)],
+        final_dir / "white_vs_final.png",
+        panel_size=(768, 768),
+    )
+    contact_sheet = _write_labeled_contact_sheet(
+        [(view_id, path) for view_id, path in final_view_images.items()],
+        final_dir / "contact_sheet.png",
+        panel_size=(512, 512),
+    )
     agent_report = _copy_or_blank(agent_summary.get("agent_report"), workdir / "reports" / "agent_report.json")
     final_scene_manifest = {
         "task_id": auto_task["task_id"],
@@ -6732,6 +6763,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         ),
     )
     concept_final_comparison_path = workdir / "reports" / "concept_final_comparison.json"
+    white_model_position_fit_path = workdir / "reports" / "white_model_position_fit.json"
     white_model_position_lock = tool_executor.run(
         "white_model_position_lock",
         {"final_view_images": final_view_images, "render_manifest": str(render_manifest_path)},
@@ -6764,6 +6796,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             and module_scores["total"] >= 0.75
             and sanity_summary["status"] == "pass"
             and white_model_position_contract["status"] == "pass"
+            and white_model_position_fit["status"] == "pass"
             and concept_final_comparison["status"] == "pass"
             and white_model_position_lock["status"] == "pass"
         )
@@ -6774,6 +6807,8 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     elif str(sanity_summary.get("status", "")).lower() != "pass":
         status = "needs_review"
     elif str(white_model_position_contract.get("status", "")).lower() != "pass":
+        status = "needs_review"
+    elif str(white_model_position_fit.get("status", "")).lower() != "pass":
         status = "needs_review"
     elif str(module_layout_check.get("status", "")).lower() != "pass":
         status = "needs_review"
@@ -6818,6 +6853,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "visual_judgement": str(visual_path),
         "concept_final_comparison": str(concept_final_comparison_path),
         "concept_vs_final": str(final_dir / "concept_vs_final.png"),
+        "white_model_position_fit": str(white_model_position_fit_path),
         "white_model_position_lock": str(white_model_position_lock_path),
         "white_position_lock_overlay": str(final_dir / "white_position_lock_overlay.png"),
         "final_position_retry_plan": str(final_position_retry_plan_path),
@@ -6863,6 +6899,11 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                 "status": white_model_position_contract.get("status", ""),
                 "contract_count": white_model_position_contract.get("contract_count", 0),
             },
+            "white_model_position_fit": {
+                "enabled": True,
+                "status": white_model_position_fit.get("status", ""),
+                "view_count": white_model_position_fit.get("view_count", 0),
+            },
             "white_model_position_lock": {"enabled": True, "status": white_model_position_lock["status"], "total": white_model_position_lock.get("metrics", {}).get("total", 0.0)},
             "final_position_retry_plan": {"enabled": True, "status": final_position_retry_plan.get("status", "")},
         },
@@ -6902,6 +6943,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         "visual_judgement",
         "concept_final_comparison",
         "concept_vs_final",
+        "white_model_position_fit",
         "white_model_position_lock",
         "white_position_lock_overlay",
         "final_position_retry_plan",
