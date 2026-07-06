@@ -1329,6 +1329,22 @@ def _write_codex_image2_handoff(
                     "",
                 ]
             )
+        if item.get("edit_target_role"):
+            lines.extend(
+                [
+                    f"- Edit target role: `{item.get('edit_target_role')}`",
+                    "",
+                ]
+            )
+        examples = item.get("few_shot_position_lock_examples")
+        if isinstance(examples, list) and examples:
+            lines.extend(["Few-shot position-lock examples:", ""])
+            for example_index, example in enumerate(examples, start=1):
+                if not isinstance(example, dict):
+                    continue
+                lines.append(f"{example_index}. Failure pattern: {example.get('failure_pattern', '')}")
+                lines.append(f"   Corrected instruction: {example.get('corrected_instruction', '')}")
+            lines.append("")
         lines.extend(
             [
                 "Prompt:",
@@ -4816,6 +4832,35 @@ def _position_contract_prompt_clause(contract: dict[str, Any]) -> str:
     )
 
 
+def _position_contract_boundary_clause(contract: dict[str, Any]) -> str:
+    bbox = contract.get("bbox_norm", []) if isinstance(contract, dict) else []
+    center = contract.get("center_norm", []) if isinstance(contract, dict) else []
+    coverage = contract.get("coverage_ratio", "") if isinstance(contract, dict) else ""
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return ""
+    x0, y0, x1, y1 = bbox
+    return (
+        "Binding screen-space target: use the white_model_rgb_position_lock image as the edit target. "
+        f"Foreground left/right/top/bottom boundaries remain at normalized bbox [{x0}, {y0}, {x1}, {y1}], "
+        f"with center {center} and coverage {coverage}. "
+        "Material, lighting, color, reflections, and surface detail are applied within the existing white-model silhouettes. "
+        "Background, empty regions, crop, visible object count, module overlaps, and foreground/background order remain aligned to the edit target."
+    )
+
+
+def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
+    return [
+        {
+            "failure_pattern": "The generated product render expands the car and platform into a full hero composition while the side-view white model has a lower, narrower foreground bbox.",
+            "corrected_instruction": "Use the white_model_rgb_position_lock image as the edit target, keep the original bbox top/bottom/left/right boundaries, and apply polished material inside those existing silhouettes.",
+        },
+        {
+            "failure_pattern": "The generated render changes foreground/background order by moving the robotic arm or panels to a cleaner marketing layout.",
+            "corrected_instruction": "Keep the robotic arm, panels, platform, car, and light bars at the same screen-space positions and overlaps as the white-model edit target, then add lighting and surface finish.",
+        },
+    ]
+
+
 def _write_codex_image2_final_request(
     *,
     workdir: Path,
@@ -5465,7 +5510,13 @@ def _load_gray_array(path: str | Path, size: tuple[int, int] = (512, 512)) -> np
 
 def _mask_from_channel(path: str | Path, size: tuple[int, int] = (512, 512)) -> np.ndarray:
     gray = _load_gray_array(path, size=size)
-    return gray > 24.0
+    mask = gray > 24.0
+    if float(mask.mean()) <= 0.92:
+        return mask
+    low, high = np.percentile(gray, [2.0, 98.0])
+    if float(high - low) >= 24.0:
+        return gray > float((low + high) * 0.5)
+    return gray > float(np.mean(gray) + max(6.0, np.std(gray) * 0.35))
 
 
 def _foreground_mask_from_rgb(path: str | Path, size: tuple[int, int] = (512, 512)) -> np.ndarray:
@@ -5887,6 +5938,8 @@ def create_final_position_retry_plan(
         contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else contracts_by_view.get(view_id, {})
         prompt_parts = [
             str(item.get("prompt") or ""),
+            "Use the white_model_rgb_position_lock input image as the edit target and binding white-model layout.",
+            _position_contract_boundary_clause(contract),
             "Position-lock correction pass: preserve the white-model contract as the exact screen-space target.",
             f"Target bbox {contract.get('bbox_norm', [])}, center {contract.get('center_norm', [])}, coverage {contract.get('coverage_ratio', '')}.",
             f"Previous position check metrics: {white_lock_report.get('metrics', {})}.",
@@ -5902,6 +5955,8 @@ def create_final_position_retry_plan(
             "output_path": _absolute_artifact_path(item.get("output_path") or final_dir / _final_output_filename(view_id)),
             "prompt": "\n\n".join(part for part in prompt_parts if part),
             "input_images": item.get("input_images", []),
+            "edit_target_role": "white_model_rgb_position_lock",
+            "few_shot_position_lock_examples": _final_position_retry_few_shot_examples(),
             "position_lock": {
                 **(item.get("position_lock") if isinstance(item.get("position_lock"), dict) else {}),
                 "retry_policy": "correct_to_white_model_position_contract",
@@ -5928,6 +5983,8 @@ def create_final_position_retry_plan(
         "codex_image2_handoff": str(handoff_path.resolve()),
         "reference_policy": "white_model_position_locked_render_channels_only",
         "retry_scope": "all_final_request_views",
+        "edit_target_role": "white_model_rgb_position_lock",
+        "few_shot_position_lock_examples": _final_position_retry_few_shot_examples(),
         "original_request": _absolute_artifact_path(request_path),
         "white_model_position_contract": _absolute_artifact_path(position_contract_path),
         "white_model_position_lock": white_lock_report,

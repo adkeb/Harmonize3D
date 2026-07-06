@@ -12,7 +12,9 @@ from local3dai.auto_scene import (
     AutoSceneOptions,
     ExternalImagegenRequired,
     SceneToolExecutor,
+    _binary_bbox,
     _extract_concept_camera_target,
+    _mask_from_channel,
     _module_reference_prompt_with_safety,
     _pending_external_imagegen_summary,
     _score_camera_preview_image,
@@ -1465,7 +1467,9 @@ class AutoSceneTest(unittest.TestCase):
             files = {}
             for channel in ("rgb", "edge", "depth", "normal", "mask"):
                 path = view_dir / f"{channel}.png"
-                Image.new("RGB", (32, 32), (210, 210, 210)).save(path)
+                image = Image.new("RGB", (32, 32), (42, 44, 48))
+                ImageDraw.Draw(image).rectangle((7, 10, 26, 24), fill=(210, 210, 210), outline=(120, 160, 220), width=1)
+                image.save(path)
                 files[channel] = str(path)
             render_manifest = write_manifest(
                 root / "renders" / "render_manifest.json",
@@ -1644,6 +1648,20 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(shifted_report["status"], "needs_review")
             self.assertIn("center_alignment", shifted_report["failure_reasons"])
 
+    def test_soft_gray_mask_channel_does_not_select_entire_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mask_path = Path(tmp) / "soft_mask.png"
+            image = Image.new("L", (128, 128), 61)
+            ImageDraw.Draw(image).rectangle((30, 42, 100, 90), fill=214)
+            image.convert("RGB").save(mask_path)
+
+            mask = _mask_from_channel(mask_path, size=(128, 128))
+            bbox = _binary_bbox(mask)
+
+            self.assertIsNotNone(bbox)
+            self.assertLess(float(mask.mean()), 0.5)
+            self.assertEqual(bbox, [0.234375, 0.328125, 0.789062, 0.710938])
+
     def test_multiview_position_lock_fails_when_side_view_drifts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1755,11 +1773,17 @@ class AutoSceneTest(unittest.TestCase):
             item = retry_request["requests"][0]
             self.assertEqual(item["kind"], "final_render_position_retry")
             self.assertIn("center_alignment", item["prompt"])
+            self.assertIn("Binding screen-space target", item["prompt"])
+            self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
+            self.assertTrue(item["few_shot_position_lock_examples"])
             roles = {entry["role"] for entry in item["input_images"]}
             self.assertIn("white_model_rgb_position_lock", roles)
             self.assertNotIn("appearance_style_reference_only", roles)
             self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
             self.assertTrue(Path(retry["codex_image2_handoff"]).exists())
+            handoff_text = Path(retry["codex_image2_handoff"]).read_text(encoding="utf-8")
+            self.assertIn("Edit target role", handoff_text)
+            self.assertIn("Few-shot position-lock examples", handoff_text)
 
     def test_final_position_retry_plan_includes_all_final_request_views(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1838,6 +1862,9 @@ class AutoSceneTest(unittest.TestCase):
                 self.assertIn("white_model_rgb_position_lock", roles)
                 self.assertIn("edge_silhouette_lock", roles)
                 self.assertIn("white-model", item["prompt"])
+                self.assertIn("Binding screen-space target", item["prompt"])
+                self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
+                self.assertTrue(item["few_shot_position_lock_examples"])
             self.assertIn("view_left_30=/path/to/codex-image2-output-2.png", Path(retry["codex_image2_handoff"]).read_text(encoding="utf-8"))
             self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
 
