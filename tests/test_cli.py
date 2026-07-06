@@ -115,6 +115,49 @@ class AutoSceneCliTest(unittest.TestCase):
             self.assertTrue(options.dry_run)
             self.assertFalse(options.use_llm)
 
+    def test_auto_scene_fit_position_lock_keeps_summary_final_images_on_originals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(rgb).rectangle((20, 48, 112, 112), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).rectangle((20, 48, 112, 112), fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            edge = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(edge).rectangle((20, 48, 112, 112), outline=255, width=3)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}}]})
+
+            final = root / "final" / "final_view_hero.png"
+            final.parent.mkdir(parents=True)
+            final_img = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(final_img).rectangle((2, 4, 126, 78), fill=(235, 237, 240), outline=(80, 150, 230), width=3)
+            final_img.save(final)
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "render_manifest": str(render_manifest),
+                    "final_image": str(final),
+                    "final_view_images": {"view_hero": str(final)},
+                    "capabilities": {},
+                },
+            )
+
+            code, result = self._run_cli(["auto-scene-fit-position-lock", "--workdir", str(root)])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(result["mode"], "copy")
+            self.assertNotEqual(result["output_view_images"]["view_hero"], str(final))
+            summary = read_manifest(root / "auto_scene_summary.json")
+            self.assertEqual(summary["final_image"], str(final))
+            self.assertEqual(summary["final_view_images"], {"view_hero": str(final)})
+
     def test_auto_scene_position_retry_import_only_skips_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

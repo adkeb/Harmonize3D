@@ -24,7 +24,9 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally tracked through per-stage reports instead of a single unchecked success label. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 retry path now preserves all final-render request views instead of only the hero request. A generic `white_model_position_fit` stage post-fits imported image2 final renders to each Blender white-model screen-space bbox before the normal multiview `white_model_position_lock` verifier runs. On the current three-view workdir, `white_model_position_fit` passes, `white_model_position_lock` passes with pass rate `1.0`, and `final_position_retry_plan` reports `not_needed`. The remaining engineering target is running a fresh full real Auto Scene job end to end with the automatic fit stage enabled and using that run as the next paper-quality package.
+Current status is intentionally tracked through per-stage reports instead of a single unchecked success label. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 retry path now preserves all final-render request views instead of only the hero request. `white_model_position_fit` is now a diagnostic preview only: it can write fitted copies under `final/position_fitted`, but it does not overwrite `final_view_*.png` and does not make a result complete. On the current three-view workdir, the original image2 finals fail strict `white_model_position_lock` with pass rate `0.333333`, and `final_position_retry_plan` reports `awaiting_codex_image2_retry`. The next required step is generating a new Codex image2 final batch from the Blender white-model channel requests and accepting it only if the original generated images pass strict position lock.
+
+The latest paper image refresh fixes a stale-asset issue: the previous DOCX/PDF still embedded older failed final-render views with grey occlusion artifacts. Paper figures are now synchronized from the current Auto Scene workdir via `scripts/sync_paper_auto_scene_assets.py`, so `docs/paper_assets` and `reports/paper_assets` are both sourced from the same render manifest, original final images, and position-lock reports rather than manually cropped presentation images.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
@@ -34,7 +36,7 @@ Current status is intentionally tracked through per-stage reports instead of a s
 
 ![Latest white-model hero view](docs/paper_assets/white_model_view_hero.png)
 
-![Latest final hero view](docs/paper_assets/final_view_hero.png)
+![Current final AI candidate hero view](docs/paper_assets/final_view_hero.png)
 
 ## What It Does
 
@@ -200,12 +202,11 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
   --workdir outputs/auto_scene/demo_showroom
 ```
 
-The main Auto Scene packaging path now runs the same generic post-image2 fit stage before final verification. For older workdirs or manual Codex image2 imports, run it explicitly before replanning. This does not create a view-specific hard-coded render; it reads each view's white-model mask bbox and the imported image2 foreground bbox, then scales/translates the final image foreground into the white-model bbox before the normal multiview position-lock verifier runs:
+The main Auto Scene packaging path now runs the same generic post-image2 fit stage as a diagnostic preview before final verification. For older workdirs or manual Codex image2 imports, run it explicitly before replanning. This does not create a view-specific hard-coded render; it reads each view's white-model mask bbox and the imported image2 foreground bbox, then writes fitted preview copies under `final/position_fitted`. These previews are not accepted as final renders. Only the original image2 outputs can pass `white_model_position_lock` and become complete:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-fit-position-lock \
-  --workdir outputs/auto_scene/demo_showroom \
-  --in-place
+  --workdir outputs/auto_scene/demo_showroom
 
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-plan-position-retry \
   --workdir outputs/auto_scene/demo_showroom

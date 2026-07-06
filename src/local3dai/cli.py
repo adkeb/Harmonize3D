@@ -546,10 +546,6 @@ def cmd_auto_scene_fit_position_lock(args: argparse.Namespace) -> int:
 
     if summary and not args.no_summary_update:
         summary["white_model_position_fit"] = str(output_report)
-        if not args.in_place and isinstance(fit_report.get("output_view_images"), dict):
-            summary["final_view_images"] = dict(fit_report["output_view_images"])
-            if fit_report["output_view_images"].get("view_hero"):
-                summary["final_image"] = fit_report["output_view_images"]["view_hero"]
         capabilities = summary.setdefault("capabilities", {})
         if isinstance(capabilities, dict):
             capabilities["white_model_position_fit"] = {
@@ -894,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
     position_fit.add_argument("--final-image", help="Override final image path")
     position_fit.add_argument("--output-report", help="Override output path for reports/white_model_position_fit.json")
     position_fit.add_argument("--output-dir", help="Output directory for fitted final view copies")
-    position_fit.add_argument("--in-place", action="store_true", help="Overwrite final view images after backing up originals under final/position_fit_originals")
+    position_fit.add_argument("--in-place", action="store_true", help="Overwrite final view images after backing up originals; diagnostic/manual use only, not recommended for final acceptance")
     position_fit.add_argument("--no-summary-update", action="store_true", help="Do not write fit artifact paths back into auto_scene_summary.json")
     position_fit.add_argument("--allow-fail", action="store_true", help="Return exit code 0 even when fitting cannot process every view")
     position_fit.set_defaults(func=cmd_auto_scene_fit_position_lock)

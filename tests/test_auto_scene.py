@@ -1711,6 +1711,46 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(lock["status"], "pass")
             self.assertGreaterEqual(lock["view_reports"][0]["metrics"]["center_alignment"], 0.9)
 
+    def test_white_model_position_lock_rejects_marketing_recomposition_bbox_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            rect = (20, 48, 112, 112)
+            rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(rgb).rectangle(rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).rectangle(rect, fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            edge = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(edge).rectangle(rect, outline=255, width=3)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            render_manifest = write_manifest(
+                root / "renders" / "render_manifest.json",
+                {"views": [{"view_id": "view_hero", "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}}]},
+            )
+
+            final = root / "final" / "marketing_recomposed.png"
+            final.parent.mkdir(parents=True)
+            final_img = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(final_img).rectangle((0, 10, 128, 118), fill=(235, 237, 240), outline=(80, 150, 230), width=3)
+            final_img.save(final)
+
+            report = create_white_model_position_lock_report(
+                final_image=final,
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "lock.json",
+                output_image=root / "final" / "lock.png",
+            )
+
+            self.assertEqual(report["status"], "needs_review")
+            self.assertIn("bbox_iou", report["failure_reasons"])
+            self.assertIn("center_alignment", report["failure_reasons"])
+
     def test_multiview_position_lock_fails_when_side_view_drifts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

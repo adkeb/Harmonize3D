@@ -18,7 +18,7 @@ th, td { border: 1px solid var(--line); padding: 7px 8px; vertical-align: top; o
 th { background: #eef5fc; font-weight: 700; }
 figure { margin: 18px auto 24px; text-align: center; break-inside: avoid; }
 figure img { max-width: 100%; height: auto; border: 1px solid #e0e4e8; border-radius: 6px; }
-figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; text-align: center; }
 .toc { background:#f7f9fb; border:1px solid var(--line); border-radius:8px; padding: 10px 18px; margin: 20px 0 30px; break-after: page; }
 .toc h2 { border:0; margin: 4px 0 8px; }
 .toc ol { columns: 2; margin-left: 20px; }
@@ -26,145 +26,171 @@ figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
 .toc-l3 { margin-left: 18px; font-size: 12.5px; color: var(--muted); }
 @media print { body { font-size: 12.3px; } h2 { margin-top: 24px; } }
 
-</style></head><body><main><h1 id="harmonize3d：从单图-3d-闭环到全场景生成流程的阶段性研究报告">Harmonize3D：从单图 3D 闭环到全场景生成流程的阶段性研究报告</h1>
+</style></head><body><main><h1 id="harmonize3d：面向-3d-结构约束与多视图一致性的本地-ai-渲染-agent">Harmonize3D：面向 3D 结构约束与多视图一致性的本地 AI 渲染 Agent</h1>
 <nav class="toc"><h2>目录</h2><ol>
 <li class="toc-l2"><a href="#摘要">摘要</a></li>
 <li class="toc-l2"><a href="#1.-引言">1. 引言</a></li>
-<li class="toc-l2"><a href="#2.-项目总体构建">2. 项目总体构建</a></li>
-<li class="toc-l2"><a href="#3.-前期成果：单图单模型全流程已经跑通">3. 前期成果：单图/单模型全流程已经跑通</a></li>
-<li class="toc-l2"><a href="#4.-单模型多视图一致性与结构锁定扩展">4. 单模型多视图一致性与结构锁定扩展</a></li>
-<li class="toc-l2"><a href="#5.-当前扩展：全场景全流程-demo">5. 当前扩展：全场景全流程 demo</a></li>
-<li class="toc-l2"><a href="#6.-阶段性讨论：从单图成功到全场景-demo">6. 阶段性讨论：从单图成功到全场景 demo</a></li>
-<li class="toc-l2"><a href="#7.-结论">7. 结论</a></li>
+<li class="toc-l2"><a href="#2.-相关工作">2. 相关工作</a></li>
+<li class="toc-l3"><a href="#2.1-扩散模型与结构条件控制">2.1 扩散模型与结构条件控制</a></li>
+<li class="toc-l3"><a href="#2.2-文本图像到-3d-与单图重建">2.2 文本/图像到 3D 与单图重建</a></li>
+<li class="toc-l3"><a href="#2.3-多视图一致性生成">2.3 多视图一致性生成</a></li>
+<li class="toc-l3"><a href="#2.4-llm-agent-与可审计工具链">2.4 LLM Agent 与可审计工具链</a></li>
+<li class="toc-l3"><a href="#2.5-高质量图像渲染后端">2.5 高质量图像渲染后端</a></li>
+<li class="toc-l2"><a href="#3.-问题定义与设计目标">3. 问题定义与设计目标</a></li>
+<li class="toc-l2"><a href="#4.-系统总体架构">4. 系统总体架构</a></li>
+<li class="toc-l3"><a href="#4.1-核心模块与职责">4.1 核心模块与职责</a></li>
+<li class="toc-l2"><a href="#5.-方法">5. 方法</a></li>
+<li class="toc-l3"><a href="#5.1-需求扩写与任务规划">5.1 需求扩写与任务规划</a></li>
+<li class="toc-l3"><a href="#5.2-概念图模块参考图与-3d-资产生成">5.2 概念图、模块参考图与 3D 资产生成</a></li>
+<li class="toc-l3"><a href="#5.3-相机状态与坐标契约">5.3 相机状态与坐标契约</a></li>
+<li class="toc-l3"><a href="#5.4-结构通道生成与-render-manifest">5.4 结构通道生成与 render manifest</a></li>
+<li class="toc-l3"><a href="#5.5-ai-渲染与-meshlock">5.5 AI 渲染与 MeshLock</a></li>
+<li class="toc-l3"><a href="#5.6-agent-评分与反馈">5.6 Agent 评分与反馈</a></li>
+<li class="toc-l2"><a href="#6.-单对象闭环验证">6. 单对象闭环验证</a></li>
+<li class="toc-l2"><a href="#7.-多视图一致性与-meshlock-扩展">7. 多视图一致性与 MeshLock 扩展</a></li>
+<li class="toc-l2"><a href="#8.-auto-scene-agent：从单对象到全场景原型">8. Auto Scene Agent：从单对象到全场景原型</a></li>
+<li class="toc-l2"><a href="#9.-讨论">9. 讨论</a></li>
+<li class="toc-l3"><a href="#9.1-为什么强调过程模块而不是单张结果图">9.1 为什么强调过程模块，而不是单张结果图</a></li>
+<li class="toc-l3"><a href="#9.2-meshlock-的意义">9.2 MeshLock 的意义</a></li>
+<li class="toc-l3"><a href="#9.3-从对象到场景的扩展难点">9.3 从对象到场景的扩展难点</a></li>
+<li class="toc-l2"><a href="#10.-局限性">10. 局限性</a></li>
+<li class="toc-l2"><a href="#11.-结论">11. 结论</a></li>
 <li class="toc-l2"><a href="#参考文献">参考文献</a></li>
 </ol></nav>
-<p>作者：Harmonize3D Project</p>
-<p>版本：可交付论文稿 v1.1</p>
-<p>日期：2026-06-16</p>
+<p><strong>副标题</strong>：从单对象闭环到模块化全场景生成流程的阶段性研究</p>
+<p>作者：徐洋</p>
+<p>学号：20300290037</p>
+<p>专业：计算机科学与技术专业</p>
+<p>指导教师：徐志平</p>
+<p>完成时间：2026 年 6 月</p>
+<p>&gt; 本 Markdown 由 <code>reports/论文.docx</code> 同步生成；<code>reports/论文.docx</code> 是当前最新权威版本。</p>
 <h2 id="摘要">摘要</h2>
-<p>Harmonize3D 是一个面向 3D 生成、结构通道约束和多视角 AI 渲染的本地工作流。项目的核心目标不是单纯生成一张好看的图片，而是把自然语言、单图参考、3D 白模、固定相机、结构通道、AI 渲染和自动评分连接成可检查、可复现的流程。</p>
-<p>本文首先总结项目总体构建方式，然后补充前期已经完成的单图/单模型全流程成果。前期流程已经从单张参考图生成 Hunyuan3D 白模，进入 Web 工作台进行真实 3D 预览与相机锁定，再由 Blender 输出白模 RGB、Edge、Mask、Depth、Normal 等通道，最终让 AI 渲染只使用模型派生通道生成图像。该单模型流程已经产出可视化结果、对照图和 Agent 报告，白模质量记录为 312,693 vertices、625,706 faces，流程测试通过 17 项 pytest、Playwright 前端验证和图像加载检查。</p>
-<p>在单模型基础上，项目进一步探索了多视图一致性和结构锁定。Flux2 多视图 Agent 实验取得了 0.852016 的多视角一致性总分；Z-Image ControlNet + adaptive MeshLock 验证中，三视图 direct mean total 为 0.290440，而 MeshLock 后 final mean total 提升到 0.932607。这说明项目早期成果并不止于单张图片，而是已经围绕“真实模型视角、结构通道、多视图评分”形成了对象级验证。</p>
-<p>当前论文进一步把该方法推进到全场景全流程：从一句“未来汽车发布会展台”的自然语言需求出发，规划多个场景模块，生成概念、模块参考、模块资产、场景装配、三视角结构通道和最终 AI 渲染。正式 demo 使用 <code>qwen3.7-plus</code> 作为规划模型，产出 8 个场景模块和 3 个视角，视觉判断状态为 pass，多视角一致性为 0.870261，模块存在评分为 0.833333。需要明确的是：当前全场景版本仍处在 demo/prototype 阶段，已经跑通流程和交付物，但由于时间不足，真实模块级 image-to-3D、完整 Blender 场景渲染、稳定美学质量、规模化评测和生产级鲁棒性尚未充分完成。</p>
-<p>关键词：Harmonize3D；图像到 3D；结构约束；多视角一致性；MeshLock；AI Agent；全场景生成</p>
+<p>生成式图像模型能够快速产生高质量视觉概念，但在面向产品渲染、汽车展示、游戏资产预览和复杂场景设计等 3D 内容生产任务时，仍然存在结构漂移、视角不一致、过程不可审计和人工调参成本高等问题。本文提出并总结 Harmonize3D 的阶段性系统：一个本地运行的 3D 结构约束 AI 渲染 Agent。系统不把图像模型视为一次性自由生成器，而是先构建或导入真实 3D 白模，再通过相机状态、Blender 结构通道和 render manifest 建立可追踪的数据契约，最后由 AI 图像模型在模型派生通道的约束下完成视觉渲染。</p>
+<p>本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 6 月 18 日运行已经不再停留在 mock/procedural 资产；但当前 Codex image2 成图仍没有严格服从 Blender 白模通道，尤其在侧视角中出现相对位置和主体覆盖偏移。因此，系统现在把 <code>white_model_position_fit</code> 降级为诊断预览，只允许原始 image2 成图通过严格 <code>white_model_position_lock</code> 后进入成品；当前结果进入 <code>awaiting_codex_image2_retry</code>，等待按白模通道重新生成。</p>
+<p>需要明确的是，Harmonize3D 当前并非工业级渲染器，也不是已完成大规模训练或充分评测的全场景生成模型。本文的贡献在于提出一种模型外部的、轻量可审计的 3D-grounded rendering 流程：以真实 3D 模型和结构通道作为最终渲染的权威约束，以 Agent 负责任务规划、工具执行、候选筛选与失败复核，从而把“漂亮但不可控”的图像生成推进为“结构可追踪、视角可复现、结果可检查”的 3D AI 渲染工作流。</p>
+<p>关键词：Harmonize3D；3D 生成；结构通道；多视图一致性；MeshLock；AI Agent；场景生成</p>
 <h2 id="1.-引言">1. 引言</h2>
-<p>生成式图像模型已经能够快速产生高质量视觉概念，但在 3D 内容生产中仍然存在明显缺口。产品渲染、汽车展示、电商主图和发布会展台设计不仅需要“视觉上好看”，还需要遵守对象结构、相机视角、模块位置和多视角一致性。若只把一句 prompt 输入图像模型，系统很难解释生成结果为什么偏离，用户也很难判断问题出在参考图、3D 模型、相机、结构控制还是最终渲染阶段。</p>
-<p>Harmonize3D 的工作思路是把图像模型从自由生成器改造成受控渲染后端。系统先建立可检查的 3D 结构，再从结构中派生通道，最后让 AI 渲染在这些通道约束下生成结果。这样，最终图像不再是一次不可审计的黑盒输出，而是一个由 3D 模型、相机状态、渲染通道和 Agent 报告共同约束的交付物。</p>
-<p>本文补充两部分此前缺失的信息。第一，前期单图/单模型流程已经成功跑通，并有完整报告和图像结果。第二，单模型阶段还进行了多视图一致性与 MeshLock 验证，为当前全场景扩展提供了技术基础。本文随后说明当前论文版本是在上述对象级成果之上进一步尝试“全场景全流程”，但该部分目前应被界定为 demo/prototype，而不是已经完全落地的成熟系统。</p>
-<h2 id="2.-项目总体构建">2. 项目总体构建</h2>
-<p>Harmonize3D 的总体构建可以理解为六个层次。</p>
-<p>第一层是需求理解层。系统接收自然语言请求，识别主体对象、环境、场景风格、输出视角和质量约束。在当前全场景 demo 中，这一层由兼容 OpenAI API 的 Qwen planner 完成，并保留规则扩展作为 fallback。</p>
-<p>第二层是 3D 资产层。早期单模型流程使用单张图像生成或加载白模；当前全场景流程则把复杂请求拆成多个模块，例如主车、展示台、灯带、屏幕、机械臂和地面。每个模块都有语义角色、尺寸、位置和失败策略。</p>
-<p>第三层是交互定帧层。用户或系统需要明确相机状态，包括视角、距离、目标点和画幅比例。前期工作台已经支持真实 3D 模型预览、旋转、缩放、平移和固定视角，并把浏览器中的相机状态传给后端。</p>
-<p>第四层是结构通道层。系统使用 Blender 或程序化渲染器从真实 3D 模型/场景输出 RGB、Edge、Mask、Depth、Normal 等通道。这些通道是最终 AI 渲染的结构依据。</p>
-<p>第五层是 AI 候选渲染层。最终图像生成阶段不直接使用未声明的原始输入图或概念图，而是读取 render manifest 中声明的结构通道。该策略保证 AI 渲染受到几何和相机约束。</p>
-<p>第六层是 Agent 评分与打包层。系统对输出图进行结构评分、多视角一致性评分、模块存在评分和视觉判断，并生成 contact sheet、对照图、JSON 报告和可交付文件。</p>
-<p>图 1 概括了从请求到交付的 Auto Scene 流程。</p>
-<figure><img src="paper_assets/pipeline_overview.png" alt="图 1：Harmonize3D 的高层流程，从自然语言规划到结构通道、AI 渲染与报告打包"><figcaption>图 1：Harmonize3D 的高层流程，从自然语言规划到结构通道、AI 渲染与报告打包</figcaption></figure>
-<h2 id="3.-前期成果：单图单模型全流程已经跑通">3. 前期成果：单图/单模型全流程已经跑通</h2>
-<p>前期报告 <code>harmonize3d_body.pdf</code> 记录了一个更聚焦的成功闭环：从单张汽车参考图出发，生成或加载 Hunyuan3D 白模，在 Web 工作台中预览真实 3D 模型并锁定相机，然后使用 Blender 输出固定视角的白模通道，最后由 AI 模型生成受结构约束的产品渲染图。</p>
-<p>这一阶段的重要原则是：最终 AI 渲染只允许使用真实 3D 模型在固定相机下派生的 RGB 和 Edge 等通道，而不是直接复用 Hunyuan3D 的原始输入图。这样可以避免“看似成功但实际绕过 3D 模型”的问题。</p>
-<p>图 2 展示了单图输入经过预处理后的主体参考。该图用于 3D 资产阶段，而不是最终 AI 渲染阶段的直接参考。</p>
-<figure><img src="paper_assets/single_input_preprocessed.png" alt="图 2：单图输入预处理结果，用于前期单模型资产生成"><figcaption>图 2：单图输入预处理结果，用于前期单模型资产生成</figcaption></figure>
-<p>图 3 展示了 Web 工作台中的真实 3D 预览与固定视角。该工作台支持用户旋转、缩放、平移和锁定相机，前端相机状态会被写入后端渲染请求。</p>
-<figure><img src="paper_assets/single_workbench_camera_lock.png" alt="图 3：单模型工作台中的真实 3D 预览与相机锁定"><figcaption>图 3：单模型工作台中的真实 3D 预览与相机锁定</figcaption></figure>
-<p>图 4 是锁定相机后的白模渲染，代表最终 AI 渲染使用的模型派生结构依据。</p>
-<figure><img src="paper_assets/single_white_render.png" alt="图 4：固定视角下的白模渲染通道"><figcaption>图 4：固定视角下的白模渲染通道</figcaption></figure>
-<p>图 5 是基于模型通道生成的最终 AI 渲染图，图 6 是白模参考和最终图的对照。</p>
-<figure><img src="paper_assets/single_final_render.png" alt="图 5：单模型最终 AI 渲染结果"><figcaption>图 5：单模型最终 AI 渲染结果</figcaption></figure>
-<figure><img src="paper_assets/single_white_vs_final.png" alt="图 6：白模参考与最终 AI 渲染对照"><figcaption>图 6：白模参考与最终 AI 渲染对照</figcaption></figure>
-<p>该阶段的关键记录如下。</p>
+<p>文本到图像和图像到图像模型已经显著降低了视觉概念生成的门槛，但在 3D 内容生产中，用户真正需要的往往不是一张孤立图片，而是一个可以被检查、复用和多角度展示的结构化结果。例如产品图渲染需要保持外观比例和部件位置，汽车展示需要从不同相机视角保持轮廓、材质和布局的一致性，发布会展台和电商场景还要求主体、展台、灯光、屏幕和地面之间具备稳定空间关系。若只使用自然语言 prompt 直接生成图像，模型可能产出视觉上合理但结构上不可控的结果：车轮数量变化、尾翼和后视镜被随意添加、屏幕和道具在不同视角消失，或者背景与主体融合成无法回写到 3D 场景的伪结构。</p>
+<p>传统 3D 渲染器可以保证几何一致性，但需要建模、材质、灯光和摄影机调试，工作成本高且对普通用户不友好。现代 3D 生成模型可以从图像或文本得到初始 mesh，但其纹理质量、场景装配能力和可控多视角输出仍不稳定。Harmonize3D 的设计出发点是将二者结合：让 3D 模型承担结构与相机约束，让图像生成模型承担材质化、光影和最终视觉表现。系统通过显式的结构通道和 manifest 记录，把最终图像从黑盒生成变成可审计的工作流产物。</p>
+<p>本文在原项目报告的基础上重写为中期论文稿，重点不再堆砌指标，而是解释每个过程模块为什么存在、如何连接以及当前完成度如何。本文的核心问题可以表述为：给定自然语言需求或单图参考，如何在本地环境中建立一个从 3D 资产、相机状态、结构通道到多视图 AI 渲染结果的自动化闭环，并在此过程中保持结构高遵从性与基本多视图一致性？</p>
+<p>本文贡献主要包括四点。第一，提出模型派生通道原则：最终 AI 渲染默认只能读取由真实 3D 模型或场景在固定相机下生成的结构通道，避免直接绕过 3D 资产。第二，构建单对象 geometry-locked rendering 闭环，验证从单图输入、Hunyuan3D 白模、Three.js 定帧、Blender 通道到 AI 渲染的完整链路。第三，提出并验证 MeshLock 式外部结构锁定思路，将候选生成、结构评分和多视角复核作为图像模型外部的轻量控制层。第四，扩展到真实模块化 Auto Scene 原型，使系统能够从自然语言需求生成概念图与独立模块参考图，调用 3D AI 生成模块 GLB，装配为完整场景，并通过概念图—白模—最终图对比定位失败环节。</p>
+<h2 id="2.-相关工作">2. 相关工作</h2>
+<h3 id="2.1-扩散模型与结构条件控制">2.1 扩散模型与结构条件控制</h3>
+<p>扩散模型及其潜空间变体推动了高分辨率图像生成的发展。DDPM 建立了逐步去噪的生成框架 [1]，Latent Diffusion 将扩散过程转移到压缩潜空间以降低成本 [2]。然而，纯文本条件通常无法提供严格的空间约束。ControlNet 通过在预训练扩散模型旁路增加可学习条件分支，将边缘、深度、分割、姿态等控制图引入生成过程 [3]，为 Harmonize3D 中的 Edge、Depth、Mask 等结构通道提供了方法背景。不同之处在于，Harmonize3D 更强调结构通道来自真实 3D 模型和锁定相机，而不是任意外部参考图。</p>
+<h3 id="2.2-文本图像到-3d-与单图重建">2.2 文本/图像到 3D 与单图重建</h3>
+<p>DreamFusion 展示了利用 2D 扩散先验进行 text-to-3D 优化的可能性 [4]；Zero-1-to-3 通过相机相对视角条件实现单图新视角生成 [5]；Shap-E 直接生成可渲染为 mesh 或 NeRF 的隐式函数参数 [6]。近年来，Hunyuan3D 等开源 3D 生成模型进一步提高了图像到 3D 资产的速度和质量，并开始支持更多几何控制形式。Harmonize3D 并不试图替代这些底层 3D 模型，而是把它们作为资产生成后端，重点解决生成后的相机锁定、通道渲染、AI 材质化和多视角一致输出问题。</p>
+<h3 id="2.3-多视图一致性生成">2.3 多视图一致性生成</h3>
+<p>MVDream 通过从 2D 与 3D 数据中学习多视图扩散模型，使文本条件下的多视角图像具有更强的一致性 [7]。SyncDreamer 在单图条件下同步多视角扩散过程，通过 3D-aware feature attention 关联不同视角特征 [8]。Wonder3D 进一步生成多视图 normal map 与对应彩色图，并通过跨域注意力在视角和模态之间交换信息 [9]。这些方法说明多视图一致性是 3D 生成中的核心难题。Harmonize3D 的路线不同于训练新的多视图模型，而是利用已有真实 mesh、相机计划和结构通道，在模型外部建立轻量的一致性控制与评估机制。</p>
+<h3 id="2.4-llm-agent-与可审计工具链">2.4 LLM Agent 与可审计工具链</h3>
+<p>ReAct 提出了将推理和动作交替结合的语言模型 Agent 范式，使模型能够在任务执行中规划、调用工具并根据观察更新行动 [10]。Harmonize3D 借鉴这一思想，将多模态规划模型作为任务分解与工具调度器：它不直接生成最终图像，而是负责需求扩写、模块拆分、相机计划、候选策略和失败复核。与普通脚本相比，Agent 的价值在于把每一步的输入、输出、参数和判断写入报告，使复杂生成流程可以被复查和迭代。</p>
+<h3 id="2.5-高质量图像渲染后端">2.5 高质量图像渲染后端</h3>
+<p>HiDream-I1 与 HiDream-O1-Image 等新一代图像模型体现了图像生成模型向高质量、多任务、统一架构发展的趋势 [11,12]。其中 HiDream-O1-Image 采用像素空间统一 Transformer 思路，降低了传统模块化架构中 VAE 与文本编码器割裂带来的限制。Harmonize3D 对底层图像后端保持开放，当前实验使用过 HiDream、Flux2、Z-Image ControlNet 等路线；系统层面的核心并不是某一个模型，而是如何让任意强图像模型服从 3D 结构通道和 Agent 复核。</p>
+<h2 id="3.-问题定义与设计目标">3. 问题定义与设计目标</h2>
+<p>本文将目标任务定义为 3D-grounded AI rendering：给定自然语言需求、单图参考或已有 3D 模型，系统应生成一个由 3D 结构约束的单视图或多视图成图集合。每一张最终图不仅要视觉质量可接受，还必须能追溯到具体 3D 模型、相机状态和结构通道。该定义区别于普通图像生成，也区别于传统渲染。普通图像生成重点在生成一张符合语义和审美的图；传统渲染重点在物理正确的材质和光照；Harmonize3D 的重点是在两者之间建立可控桥梁：用 3D 保结构，用 AI 提升视觉。</p>
+<p>系统设计遵循三项原则。第一，结构优先。对于产品、车辆和场景模块，主体比例、相机角度、空间位置和可见轮廓优先于自由风格化。第二，边界可审计。概念图、模块参考图和原始输入图可以服务于前期规划和 image-to-3D，但最终渲染默认只接受 render_manifest 中声明的模型派生通道。第三，Agent 不替代几何工具。语言模型或多模态模型负责任务规划与决策，但 3D 资产、相机、通道、评分和产物保存仍由确定性工具完成。</p>
+<p>基于上述原则，本文不把“生成最美的一张图”作为唯一目标，而是关注流程是否闭环、结构是否可追踪、失败是否可定位、多视图是否能够基本一致，以及从单对象到多模块场景是否具有可扩展路径。</p>
+<h2 id="4.-系统总体架构">4. 系统总体架构</h2>
+<p>Harmonize3D 当前由六个主要层次组成：需求理解与规划层、3D 资产层、相机与场景层、结构通道层、AI 渲染层和 Agent 复核层。图 1 给出了中期版本的整体架构。自然语言请求首先被 Planner 扩写为结构化任务，随后系统生成总体概念图和模块参考图，调用 image-to-3D 或导入模型生成资产，再由 Scene Assembly 完成缩放、位置摆放和碰撞检查。相机计划确定多视角输出，Blender 输出结构通道并写入 render_manifest。最终 AI 渲染只读取声明通道，Agent 则对候选图进行评分、重试和打包。</p>
+<figure><img src="paper_assets/fig_architecture.png" alt="fig_architecture.png"></figure>
+<p class="caption">图 1  Harmonize3D 从自然语言到多视图成图的可审计闭环架构。</p>
+<p>图 2 强调了本文最重要的数据边界。Harmonize3D 允许在早期使用用户文本、概念图和模块参考图帮助规划或生成 3D 资产，但最终 AI 渲染默认不能直接读取这些前期参考。它只能读取由真实 3D 模型或完整场景在指定相机下派生出的 RGB、Edge、Mask、Depth、Normal 等通道。该边界让最终结果具备可追溯性：一旦图像出现结构漂移，系统可以定位问题发生在 3D 模型、相机、通道、AI 候选参数还是 Agent 决策，而不是停留在不可解释的 prompt 偏差。</p>
+<figure><img src="paper_assets/fig_trust_boundary.png" alt="fig_trust_boundary.png"></figure>
+<p class="caption">图 2  模型派生通道原则与最终 AI 渲染信任边界。</p>
+<h3 id="4.1-核心模块与职责">4.1 核心模块与职责</h3>
 <table>
-<tr><th>项目</th><th>结果</th></tr>
-<tr><td>白模顶点数</td><td>312,693</td></tr>
-<tr><td>白模面数</td><td>625,706</td></tr>
-<tr><td>bbox ratio</td><td>3.78513</td></tr>
-<tr><td>components</td><td>6</td></tr>
-<tr><td>max component face ratio</td><td>0.999546</td></tr>
-<tr><td>mesh sanity</td><td>pass</td></tr>
-<tr><td>background remover</td><td>true</td></tr>
-<tr><td>测试状态</td><td>17 项 pytest 通过，前端 Playwright 流程通过</td></tr>
+<tr><th>模块</th><th>职责</th></tr>
+<tr><td>Planner</td><td>将一句话需求扩写为对象、场景、材质、相机和输出规格，并决定单对象或全场景路径。</td></tr>
+<tr><td>Asset Generator</td><td>调用 Hunyuan3D 或已有模型导入，生成可进入后续渲染的 GLB/BLEND 资产。</td></tr>
+<tr><td>Camera Controller</td><td>在 Web 端或自动模式下确定相机状态，并完成 Three.js Y-up 到 Blender Z-up 的坐标转换。</td></tr>
+<tr><td>Channel Renderer</td><td>使用 Blender 在固定相机下输出 RGB、Edge、Mask、Depth、Normal 等结构通道。</td></tr>
+<tr><td>AI Renderer</td><td>读取 render_manifest 中的模型派生通道，生成材质化、光影和产品摄影风格的候选图。</td></tr>
+<tr><td>Agent Evaluator</td><td>根据结构、干净度、模块存在和多视角一致性进行复核，并生成报告、对照图与最终选择。</td></tr>
 </table>
-<p>Agent 报告同时记录了结构评分和复核状态：edge F1 为 0.035240，mask IoU 为 0.420527，background cleanliness 为 0.954219，总分为 0.494008，状态为 <code>needs_review</code>。这里的 <code>needs_review</code> 不代表流程失败，而是说明早期评分器对边缘一致性较严格，且单模型最终图虽然视觉可用，但结构评估仍需要人工复核。</p>
-<p>前期单模型成果的价值在于它证明了完整链路可行：单图参考可以生成白模，白模可以进入可交互工作台，相机可以被精确传给 Blender，Blender 可以输出结构通道，AI 渲染可以只依赖模型派生通道生成结果，Agent 可以记录过程并产出报告。</p>
-<h2 id="4.-单模型多视图一致性与结构锁定扩展">4. 单模型多视图一致性与结构锁定扩展</h2>
-<p>单模型流程跑通后，项目继续验证多视图一致性。该部分不是全场景实验，而是对象级技术验证，目的是确认同一个模型在多个视角下能否保持主体形状和外观一致。</p>
-<p>图 7 展示了单模型三视图 Agent 输出。三个视角分别来自固定模型和相机计划，而不是彼此独立的 prompt 随机生成。</p>
-<figure><img src="paper_assets/single_multiview_contact.png" alt="图 7：单模型三视图 Agent 输出，用于多视角一致性验证"><figcaption>图 7：单模型三视图 Agent 输出，用于多视角一致性验证</figcaption></figure>
-<p>Flux2 多视图实验的核心指标如下。</p>
-<table>
-<tr><th>视角</th><th>total</th><th>mask IoU</th><th>edge F1</th><th>说明</th></tr>
-<tr><td>view_locked</td><td>0.826449</td><td>0.909773</td><td>0.272633</td><td>结构保持较好</td></tr>
-<tr><td>view_left_30</td><td>0.788799</td><td>0.882876</td><td>0.242936</td><td>edge chamfer 偏低</td></tr>
-<tr><td>view_right_30</td><td>0.870384</td><td>0.958360</td><td>0.267643</td><td>三视图中最高</td></tr>
-<tr><td>多视角一致性 total</td><td>0.852016</td><td>-</td><td>-</td><td>body color consistency 0.827760，mask/edge consistency 0.881663</td></tr>
-</table>
-<p>后续又测试了 Z-Image ControlNet 与 adaptive MeshLock。该实验的意义不在于直接得到最美观的图，而是验证“原始图像模型输出结构不稳定时，是否能用模型通道和 MeshLock 把结构拉回”。图 8 展示了 source、canny control、direct output 和 MeshLock 后 final output 的对比。</p>
-<figure><img src="paper_assets/single_zimage_adaptive_contact.png" alt="图 8：Z-Image ControlNet + adaptive MeshLock 三视图验证"><figcaption>图 8：Z-Image ControlNet + adaptive MeshLock 三视图验证</figcaption></figure>
-<p>Z-Image 三视图 canny adaptive MeshLock 的关键结果如下。</p>
-<table>
-<tr><th>视角</th><th>direct total</th><th>MeshLock final total</th><th>final silhouette IoU</th><th>final edge chamfer</th></tr>
-<tr><td>view_locked</td><td>0.338274</td><td>0.933229</td><td>0.989336</td><td>0.877183</td></tr>
-<tr><td>view_left_30</td><td>0.297799</td><td>0.940175</td><td>0.995809</td><td>0.889330</td></tr>
-<tr><td>view_right_30</td><td>0.235248</td><td>0.924417</td><td>0.991748</td><td>0.864963</td></tr>
-<tr><td>mean</td><td>0.290440</td><td>0.932607</td><td>-</td><td>-</td></tr>
-</table>
-<p>这组实验说明：底层图像模型本身并不稳定，普通参考图或直接 ControlNet 输出容易发生结构漂移；但只要保留 3D 模型、相机和结构通道作为权威约束，就可以通过 MeshLock 显著提升结构一致性。因此，项目的关键价值不应归结为“换一个图像模型”，而应归结为模型外部的 3D 结构控制、多视图评分和可审计 Agent 流程。</p>
-<h2 id="5.-当前扩展：全场景全流程-demo">5. 当前扩展：全场景全流程 demo</h2>
-<p>当前论文在前期单模型成果上进一步扩展到全场景任务。输入请求为：生成一个未来汽车发布会展台，中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面，输出三张产品级渲染图。</p>
-<p>这一任务比单模型更复杂，因为系统不仅要处理一辆车，还要处理展台、屏幕、机械臂、灯带、地面和相机之间的空间关系。当前 demo 把场景拆成 8 个模块：</p>
-<table>
-<tr><th>模块</th><th>角色</th><th>状态</th></tr>
-<tr><td>main_vehicle</td><td>主体车辆</td><td>pass</td></tr>
-<tr><td>display_platform</td><td>展示台</td><td>pass</td></tr>
-<tr><td>left_led_screen</td><td>左侧屏幕</td><td>pass</td></tr>
-<tr><td>right_led_screen</td><td>右侧屏幕</td><td>pass</td></tr>
-<tr><td>robotic_arm_left</td><td>左侧机械臂</td><td>pass</td></tr>
-<tr><td>robotic_arm_right</td><td>右侧机械臂</td><td>pass</td></tr>
-<tr><td>blue_light_strips</td><td>蓝色灯带</td><td>pass</td></tr>
-<tr><td>reflective_floor</td><td>反光地面</td><td>needs_review</td></tr>
-</table>
-<p>图 9 是全场景 demo 的结构预览，用于检查模块布局和相机下的主要空间关系。</p>
-<figure><img src="paper_assets/scene_preview.png" alt="图 9：全场景 demo 的结构预览"><figcaption>图 9：全场景 demo 的结构预览</figcaption></figure>
-<p>图 10 展示了 hero view 下由场景派生的结构通道。全场景阶段仍遵守同一原则：最终 AI 渲染应基于场景结构通道，而不是直接绕过场景资产。</p>
-<figure><img src="paper_assets/render_channels_view_hero.png" alt="图 10：全场景 demo 的 RGB、Edge、Mask、Depth、Normal 通道"><figcaption>图 10：全场景 demo 的 RGB、Edge、Mask、Depth、Normal 通道</figcaption></figure>
-<p>图 11 展示了三视角最终输出，图 12 展示了白模/结构参考与最终图的对照。</p>
-<figure><img src="paper_assets/final_contact_sheet.png" alt="图 11：全场景 demo 的三视角最终输出"><figcaption>图 11：全场景 demo 的三视角最终输出</figcaption></figure>
-<figure><img src="paper_assets/white_vs_final.png" alt="图 12：全场景 demo 的结构参考与最终渲染对照"><figcaption>图 12：全场景 demo 的结构参考与最终渲染对照</figcaption></figure>
-<p>正式 demo 的关键指标如下。</p>
-<table>
-<tr><th>指标</th><th>数值或状态</th></tr>
-<tr><td>planner</td><td>qwen3.7-plus</td></tr>
-<tr><td>场景模块数</td><td>8</td></tr>
-<tr><td>输出视角数</td><td>3</td></tr>
-<tr><td>elapsed seconds</td><td>130.725</td></tr>
-<tr><td>visual judgement</td><td>pass</td></tr>
-<tr><td>multiview total</td><td>0.870261</td></tr>
-<tr><td>body color consistency</td><td>0.852774</td></tr>
-<tr><td>mask/edge feature consistency</td><td>0.891634</td></tr>
-<tr><td>module score</td><td>0.833333</td></tr>
-<tr><td>structure min total</td><td>0.699084</td></tr>
-</table>
-<p>从结果看，demo 已经实现了从自然语言到多模块场景、三视图输出和自动报告的闭环。它也具备一定视觉判断能力和工具执行能力：系统会记录 planner、模块生成、场景装配、结构通道渲染、AI 候选、评分和打包等工具调用，并对最终图是否非空、结构分数、多视角一致性和模块存在情况进行判断。</p>
-<p>同时，这一结果不能被过度表述为“已经完全完成”。当前全场景输出更适合作为 prototype 证明：流程是连通的，报告是可审计的，图像是可生成的，但还没有达到稳定产品化或论文充分实验的成熟度。</p>
-<h2 id="6.-阶段性讨论：从单图成功到全场景-demo">6. 阶段性讨论：从单图成功到全场景 demo</h2>
-<p>从项目进展看，Harmonize3D 已经经历了三个阶段。</p>
-<p>第一阶段是单图/单模型闭环。该阶段已经成功，证据包括 <code>harmonize3d_body.pdf</code> 中的单图输入、Hunyuan3D 白模、Web 定帧、Blender 通道、AI 渲染和 Agent 报告。</p>
-<p>第二阶段是单模型多视图与结构锁定。该阶段验证了多视角评分和 MeshLock 的必要性。Flux2 多视图实验说明单模型三视角可以形成一致输出；Z-Image adaptive MeshLock 实验说明仅依赖图像模型会出现结构漂移，但结构通道和 MeshLock 能显著提升结构指标。</p>
-<p>第三阶段是当前全场景 demo。该阶段把对象级流程扩展到多个模块、多个视角和完整场景报告。它已经证明了方法可以迁移到更复杂任务，但仍然存在明显未完成项：</p>
-<ul>
-<li>真实模块级 image-to-3D 尚未充分落地，目前部分模块仍依赖 procedural/mock 或轻量替代路径。</li>
-<li>完整 Blender 场景渲染还没有完全替换程序化 scene channel renderer。</li>
-<li>全场景最终图的结构分数仍不够稳定，例如正式 demo 的 structure min total 为 0.699084，说明部分视角仍有轮廓或边缘偏差。</li>
-<li>模块评分中 reflective_floor 仍为 <code>needs_review</code>，说明复杂环境模块的检测与视觉质量还需增强。</li>
-<li>视觉判断主要基于 CV 结构指标和非空检查，尚未充分加入 VLM 语义判断、人工标注基准和大规模失败分类。</li>
-<li>当前实验主要围绕汽车展示场景，尚不能直接泛化到任意产品、角色、建筑或室内场景。</li>
-</ul>
-<p>因此，论文应准确表述为：前期单图/单模型流程已经成功，单模型多视图一致性与 MeshLock 已经有阶段性验证；当前工作是在此基础上进一步推进全场景全流程，但由于时间不足，全场景部分目前仍处于 demo/prototype 阶段，还没有充分完成生产级落地。</p>
-<h2 id="7.-结论">7. 结论</h2>
-<p>本文补充并重构了 Harmonize3D 的阶段性论文叙述。项目早期已经完成单图到单模型的真实闭环：输入图生成 3D 白模，Web 工作台锁定相机，Blender 输出结构通道，AI 渲染只使用模型派生通道，Agent 输出评分和报告。在此基础上，项目进一步完成了单模型多视角一致性验证，并通过 Z-Image + adaptive MeshLock 证明结构锁定可以显著提升三视图结构指标。</p>
-<p>当前论文进一步展示了全场景 Auto Scene demo：系统能把一句自然语言请求拆解成 8 个模块，生成场景结构、三视角通道、最终图和自动报告，视觉判断为 pass，多视角一致性为 0.870261。这说明 Harmonize3D 的方向是可行的：用显式 3D 结构和可审计 Agent 流程约束图像模型，能够比单次 prompt 生成更适合 3D 场景生产。</p>
-<p>但全场景部分仍需谨慎界定。当前成果是 demo 级闭环，不是完全成熟的论文实验或生产系统。后续需要继续完成真实模块 image-to-3D、完整 Blender 场景通道、更多场景类别、VLM 级视觉判断、结构评分改进和系统化 ablation，才能把当前 prototype 推进到更充分的全场景全流程落地。</p>
+<h2 id="5.-方法">5. 方法</h2>
+<h3 id="5.1-需求扩写与任务规划">5.1 需求扩写与任务规划</h3>
+<p>在单对象模式中，用户输入通常描述一个主体对象，如“未来感白色电动跑车”。在全场景模式中，用户输入可能包含多个对象和空间关系，如“中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面”。Planner 的作用是把自然语言中的对象、属性、方位词和输出意图转为结构化计划。例如，名词短语被识别为候选模块，方位词被转为 placement 约束，颜色和材质词被转为 material hint，产品图或发布会等风格词则影响相机和灯光预设。</p>
+<p>当前 demo 使用兼容 OpenAI API 的 Qwen planner 进行扩写，同时保留规则 fallback。Planner 的输出不是最终图像 prompt，而是 scene_plan、module_plan、camera_plan 和 prompt_plan 等可检查中间产物。这样做可以把“模型想了什么”转化为“系统将执行什么”。</p>
+<h3 id="5.2-概念图模块参考图与-3d-资产生成">5.2 概念图、模块参考图与 3D 资产生成</h3>
+<p>对于复杂场景，系统首先生成总体概念图。概念图用于帮助用户和 Agent 明确构图、色彩、模块主次和场景氛围，但它并不直接进入最终渲染。随后系统为每个模块生成独立参考图，使 image-to-3D 阶段能够处理更干净的单一主体。例如，在汽车发布会场景中，主车、展示台、屏幕、机械臂和灯带被拆分为不同模块；每个模块生成白底或简单背景参考图，再进入 image-to-3D 或程序化 fallback。</p>
+<p>这一模块化策略的意义在于降低复杂场景一次性生成的难度。直接让 3D 模型生成完整发布会场景通常会造成结构混乱、尺度错误和部件混合；而先拆成模块再装配，可以让每个资产的语义、尺寸和失败策略独立记录。对于主车等 hero object，失败会触发重试或任务失败；对于地面、平台、背景屏幕等简单模块，系统可以退化为程序化几何替代，从而提高闭环稳定性。</p>
+<h3 id="5.3-相机状态与坐标契约">5.3 相机状态与坐标契约</h3>
+<p>Harmonize3D 的单对象工作台已经实现真实 GLB/OBJ 预览。用户在浏览器中旋转、缩放、平移并锁定视角后，前端发送 CameraState，其中包括 target、position、azimuth、elevation、distance_scale、ortho_scale 和 viewport_aspect。由于 glTF/Three.js 默认使用 Y-up，而 Blender 使用 Z-up，系统在后端边界统一完成坐标转换，避免前端和后端各自旋转模型造成不可复现误差。</p>
+<p>在全自动模式下，Auto Camera Planner 根据对象类型和输出需求自动生成视角。对于汽车和产品展示，默认先生成 hero view、left_30 和 right_30 三个视图，而不是一开始生成八视角。三视图足以验证主体外观和结构一致性，同时保留可控计算成本。</p>
+<h3 id="5.4-结构通道生成与-render-manifest">5.4 结构通道生成与 render manifest</h3>
+<p>结构通道是 Harmonize3D 的核心中间表示。Blender 根据固定相机输出白模 RGB、Edge、Mask、Depth、Normal。RGB 提供体积与明暗，Edge 提供轮廓和硬边，Mask 提供前景范围，Depth 和 Normal 提供空间关系与表面朝向。实践表明，在某些图像模型中直接把 Depth/Normal 作为最终参考可能会被误读为材质纹理，导致车身或背景粗糙。因此中期版本默认让最终 AI 渲染读取 RGB + Edge，而让 Mask、Depth、Normal 更多参与评分和复核。</p>
+<p>render_manifest 是连接 3D 渲染和 AI 渲染的声明式数据契约。每个视角的相机、通道路径、分辨率、采样数和源模型都会写入 manifest。AI 后端不通过隐式路径读取输入，而是从 manifest 中显式取用通道。这个契约保证了实验可复现，也便于后续接入不同图像模型。</p>
+<h3 id="5.5-ai-渲染与-meshlock">5.5 AI 渲染与 MeshLock</h3>
+<p>AI 渲染阶段的目标不是重新发明 3D 结构，而是在既定结构上完成材质、玻璃、轮胎、灯光和背景质感。前期实验显示，强图像模型视觉质量高，但会根据超跑或产品图先验添加不存在的细节；弱约束模型则更容易出现轮廓漂移和模块缺失。MeshLock 的思想是在图像模型外部建立结构锁定层：首先从 3D 模型获得结构通道，其次生成多个候选，再通过结构评分、多视角复核和失败规则选择或重试。</p>
+<p>MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机制。它把“图像模型是否听话”转化为可检测问题：主体是否仍在 mask 内，主要轮廓是否与白模通道接近，是否出现未规划部件，多视角中颜色和结构是否突然变化。这样，图像模型可以继续承担视觉质量提升，而结构约束由外部 3D-grounded Agent 负责。</p>
+<h3 id="5.6-agent-评分与反馈">5.6 Agent 评分与反馈</h3>
+<p>早期评分器使用 edge F1 和 mask IoU 作为候选筛选依据，但 edge F1 对像素级偏移过于敏感。中期版本将评分定位从“严格指标排名”调整为“流程复核与失败分类”。系统保留基础结构指标，同时增加粗糙度、背景干净度、模块存在、多视角一致性和人工复核状态。指标不再作为论文叙事主体，而是作为 Agent 决策的证据：当结构漂移时提高边缘约束或重试；当出现脏纹理时切换 smooth product prompt；当模块缺失时重生该视角或回退到更强结构模式。</p>
+<h2 id="6.-单对象闭环验证">6. 单对象闭环验证</h2>
+<p>单对象阶段是 Harmonize3D 的第一个完整闭环。该阶段从单张汽车参考图出发，经过背景去除与方图预处理后进入 Hunyuan3D shape pipeline，生成可加载的 GLB 白模。图 3 展示了前期输入预处理结果，该图用于资产生成，而不直接进入最终 AI 渲染阶段。</p>
+<figure><img src="paper_assets/single_input_preprocessed.png" alt="single_input_preprocessed.png"></figure>
+<p class="caption">图 3  单图输入预处理结果，用于 Hunyuan3D 白模生成。</p>
+<p>生成白模后，模型被加载到 Web 工作台。工作台不再是静态状态页，而是使用 Three.js 真实显示 GLB/OBJ，用户可以拖拽、缩放和平移，并在满意构图后锁定相机。图 4 展示了单对象工作台中的真实 3D 预览和右侧白模渲染结果，说明浏览器视角已经可以传递给后端渲染流程。</p>
+<figure><img src="paper_assets/single_workbench_camera_lock.png" alt="single_workbench_camera_lock.png"></figure>
+<p class="caption">图 4  单对象工作台中的真实 3D 预览与相机锁定。</p>
+<p>图 5 是锁定视角下的白模 RGB 通道。该通道和对应 Edge 通道构成最终 AI 渲染的主要结构依据。与直接图生图不同，这一步把“参考图像”转化为“真实 3D 模型在指定相机下的结构证据”。</p>
+<figure><img src="paper_assets/single_white_render.png" alt="single_white_render.png"></figure>
+<p class="caption">图 5  锁定相机后的白模 RGB 通道。</p>
+<p>图 6 展示了单对象最终 AI 渲染结果。与白模相比，最终图加入了白色车漆、深色玻璃、轮胎、轮毂、地面反射和摄影棚光影，视觉质量显著提升。图 7 给出了白模和最终图的对照，可以看到主体姿态、前铲、车顶线条和整体低趴比例仍由白模提供约束。</p>
+<figure><img src="paper_assets/single_final_render.png" alt="single_final_render.png"></figure>
+<p class="caption">图 6  单对象 geometry-locked AI 渲染结果。</p>
+<figure><img src="paper_assets/single_white_vs_final.png" alt="single_white_vs_final.png"></figure>
+<p class="caption">图 7  单对象白模参考与最终 AI 渲染对照。</p>
+<p>最终图视觉上可用，但局部车灯、尾翼、反光和细节生成会引入额外边缘。这个现象促使项目后续从单一硬指标转向结构遵从、模块存在和多视图一致性的综合复核。</p>
+<h2 id="7.-多视图一致性与-meshlock-扩展">7. 多视图一致性与 MeshLock 扩展</h2>
+<p>单对象闭环跑通后，项目继续进行对象级多视图验证。目标不是立即生成完整场景，而是确认同一 3D 模型在多个相机视角下能否保持稳定外观。图 8 展示了 Flux2 多视图 Agent 输出。三个视角来自同一白模和相机计划，说明系统已经可以把单对象从单图输出扩展为受结构约束的三视图候选。</p>
+<figure><img src="paper_assets/single_multiview_contact.png" alt="single_multiview_contact.png"></figure>
+<p class="caption">图 8  Flux2 单对象三视图 Agent 输出。</p>
+<p>在 Flux2 实验中，多视角一致性总分约为 0.85。说明三张图在主体颜色、mask/edge 轮廓和视角变化上具有可度量的一致性。更重要的是，系统能够把每个视角的结构分数和多视角关系写入报告，为后续自动重试提供依据。</p>
+<p>为了进一步验证结构锁定的必要性，项目进行了 Z-Image ControlNet + adaptive MeshLock 实验。图 9 展示了 source、canny control、direct output 和 MeshLock 后 final output 的对比。直接输出阶段结构漂移明显，而 MeshLock 后结果更贴近白模轮廓。该实验的核心价值在于证明：一致性和客观性并非是统一的，而是需要进行协调。</p>
+<figure><img src="paper_assets/single_zimage_adaptive_contact.png" alt="single_zimage_adaptive_contact.png"></figure>
+<p class="caption">图 9  Z-Image ControlNet 与 adaptive MeshLock 三视图验证。</p>
+<p>这组实验也改变了项目的技术定位。Harmonize3D 的关键并非不断替换图像模型，而是构建“任意图像模型都必须服从 3D 结构和多视图复核”的外部控制框架。</p>
+<h2 id="8.-auto-scene-agent：从单对象到全场景原型">8. Auto Scene Agent：从单对象到全场景原型</h2>
+<p>当前版本进一步尝试全场景 Auto Scene 流程。用户输入为：“生成一个未来汽车发布会展台，中央是一辆白色低趴电动超跑，周围有蓝色灯带、黑色展示台、两块发光屏幕、机械臂和灰色反光地面，输出三张产品级渲染图。”与单对象任务相比，该请求不仅包含主车，还包含展台、屏幕、机械臂、灯带、地面和灯光氛围。系统必须理解这些元素之间的空间关系，并将其组织成可渲染场景。</p>
+<p>最新 Auto Scene 流程首先由 qwen3.7-plus Planner 生成结构化 scene_plan，再根据总体概念图生成独立模块参考图。图 10 展示了本次运行中用于 3D AI 的模块参考图：白色电动超跑、黑色展示台、左/右竖向科技屏幕和工业机械臂。参考图强调单一主体、正视图或清晰轮廓，目的是让后续 image-to-3D 更容易恢复干净几何。</p>
+<figure><img src="paper_assets/module_references_contact.png" alt="module_references_contact.png"></figure>
+<p class="caption">图 10  最新 Auto Scene 模块参考图，用于后续模块级 image-to-3D。</p>
+<p>全场景阶段最重要的变化是模块化。主车是 hero object，展示台提供空间支撑，竖向屏幕和蓝色灯带提供背景氛围，机械臂作为配角增强发布会语义。最新运行拆分为 5 个核心模块，全部调用 Hunyuan3D 2.1 shape high profile 生成 GLB，没有使用 procedural fallback。模块级评分总分为 0.855333，5 个模块均通过轻量布局评分，但屏幕类模块的几何厚度、比例和遮挡仍暴露出简单 sanity check 不足的问题。</p>
+<p>图 11 是最新全场景结构预览，用于检查模块布局、主体覆盖范围和相机下的空间关系。图 12 展示了同一 hero view 派生出的 RGB、Edge、Mask、Depth、Normal 通道。可以看到，全场景阶段仍沿用单对象阶段的核心原则：最终 AI 渲染应当基于完整场景结构通道，而不是直接把概念图或模块参考图喂给最终成图模型。</p>
+<figure><img src="paper_assets/scene_preview.png" alt="scene_preview.png"></figure>
+<p class="caption">图 11  最新 Auto Scene 结构预览。</p>
+<figure><img src="paper_assets/render_channels_view_hero.png" alt="render_channels_view_hero.png"></figure>
+<p class="caption">图 12  最新 Auto Scene hero view 的 RGB、Edge、Mask、Depth、Normal 通道。</p>
+<p>图 13 展示了重新同步后的三视角 Agent 输出，图 14 展示了白模参考与原始最终渲染对照。本次缺陷排查发现，论文中原先展示的三视角图并不是当前工作目录中的最新 Agent 包，而是旧的失败视角和校验中间图，导致页面中出现大面积灰块、遮挡和主体变暗。进一步检查后也确认，不能通过裁切、重排或 bbox 后处理把图像包装成合格成品：最终图必须由 image2 在 Blender 白模通道约束下生成，并通过原始图的白模位置锁。为避免论文资产脱离流程，项目新增 <code>scripts/sync_paper_auto_scene_assets.py</code>，只从指定 Auto Scene workdir 同步 Agent 原始产物、白模对照图和 position-lock 证据到 <code>docs/paper_assets</code> 与 <code>reports/paper_assets</code>。</p>
+<figure><img src="paper_assets/final_contact_sheet.png" alt="final_contact_sheet.png"></figure>
+<p class="caption">图 13  最新 Auto Scene 三视角 Agent 输出。</p>
+<figure><img src="paper_assets/white_vs_final.png" alt="white_vs_final.png"></figure>
+<p class="caption">图 14  最新白模参考与原始最终 AI 渲染对照。</p>
+<p>图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -&gt; 模块参考 -&gt; 模块 3D -&gt; 3D 场景组装 -&gt; Blender 白模通道 -&gt; 最终 AI 渲染”，同时也暴露出论文资产管理本身需要纳入流程：最终图不能只依赖人工复制的旧文件，而应从当前 workdir、render manifest 和位置锁定报告中可复现生成。</p>
+<p>在当前三视角工作目录中，原始最终图的 <code>white_model_position_lock</code> 为 <code>needs_review</code>，pass rate 为 0.333333；失败集中在 <code>view_left_30</code> 的 center alignment 和 <code>view_right_30</code> 的 total score。<code>final_position_retry_plan</code> 因此返回 <code>awaiting_codex_image2_retry</code>，并为 <code>view_hero</code>、<code>view_left_30</code>、<code>view_right_30</code> 三个视角生成新的 Codex image2 请求。<code>white_model_position_fit</code> 仍可生成诊断预览，但它不再覆盖 <code>final_view_*.png</code>，也不再参与 complete 判定。</p>
+<figure><img src="paper_assets/concept_vs_final.png" alt="concept_vs_final.png"></figure>
+<p class="caption">图 15  最新复盘结果：概念图、白模通道与原始最终图对比。</p>
+<figure><img src="paper_assets/white_model_view_hero.png" alt="white_model_view_hero.png"></figure>
+<p class="caption">图 16  最新结果：3D 白模 hero view。</p>
+<p>图 16 和图 17 进一步显示了当前问题来源：白模已经给出明确的展台结构，但 image2 候选仍倾向于重组为更干净的营销构图，导致机械臂、车辆、平台和屏幕的相对关系不能完全服从白模。后续改进重点是让最终成图、严格 position-lock、论文资产同步和 DOCX/PDF 构建全部由同一份 workdir 报告驱动；未通过白模锁的图只能作为候选或复盘材料，不能作为合格成品图。</p>
+<figure><img src="paper_assets/final_view_hero.png" alt="final_view_hero.png"></figure>
+<p class="caption">图 17  最新结果：原始最终 AI 候选 hero view。</p>
+<h2 id="9.-讨论">9. 讨论</h2>
+<h3 id="9.1-为什么强调过程模块而不是单张结果图">9.1 为什么强调过程模块，而不是单张结果图</h3>
+<p>在生成式 AI 项目中，单张漂亮结果很容易掩盖流程问题。Harmonize3D 的研究价值在于将结果拆解为可审计过程：输入如何扩写、模块如何识别、3D 资产是否通过 sanity check、相机是否可复现、最终 AI 渲染读取了哪些通道、候选为什么被选择或拒绝。这样的流程设计使系统具备工程可维护性和研究可分析性。</p>
+<h3 id="9.2-meshlock-的意义">9.2 MeshLock 的意义</h3>
+<p>MeshLock 并非新模型，而是对生成流程的外部约束策略。它承认图像模型强在视觉质量，却弱在严格几何遵从；同时承认传统 3D 渲染强在结构，却弱在快速美学表现。通过让 3D 通道成为最终渲染的权威参考，MeshLock 把两类系统的优势分工结合起来。</p>
+<h3 id="9.3-从对象到场景的扩展难点">9.3 从对象到场景的扩展难点</h3>
+<p>单对象流程主要关心一个 mesh 的形体和相机，而全场景流程还必须处理模块数量、相对尺度、遮挡关系、语义主次和环境一致性。最新 Auto Scene 运行已经把真实模块级 image-to-3D、场景装配和 Blender 白模通道串联起来；本次论文图缺陷排查进一步说明，成品质量不仅取决于 AI 渲染本身，也取决于最终资产是否来自当前 workdir、是否经过白模位置复核、是否被正确写入论文交付物。因此本文把全场景版本界定为可审计中期原型，而不是成熟系统。</p>
+<h2 id="10.-局限性">10. 局限性</h2>
+<p>• 屏幕、展台等规则几何模块虽然能通过基础 sanity check，但 3D AI 生成结果可能出现厚度、比例和遮挡异常，需要增加面向平板/展台类资产的语义几何检查。</p>
+<p>• 相机搜索目前更偏向通用结构分，尚未充分把概念图构图、主车正面可见性和关键模块无遮挡作为硬约束。</p>
+<p>• 最终 AI 渲染仍可能偏离白模位置或弱化主车主体，下一步需要把 Codex image2/图像渲染后端的提示词约束、白模通道和概念对比闭环结合起来。</p>
+<p>• 评分器仍以轻量 CV 指标为主，尚未充分引入 VLM 语义判断、人工标注基准和系统化失败分类。</p>
+<p>• 当前案例集中在汽车展示场景，尚不能证明对任意产品、角色、建筑或室内任务都具备同等稳定性。</p>
+<p>• 多视图一致性仍处于三视图 MVP 层面，尚未实现基于 face_id、visibility buffer 或 appearance memory 的严格跨视角表面对应。</p>
+<h2 id="11.-结论">11. 结论</h2>
+<p>本文将 Harmonize3D 从项目报告重构为中期研究论文稿，系统总结了其从单对象闭环到全场景原型的发展过程。单对象阶段证明了从单图输入、Hunyuan3D 白模、Web 相机锁定、Blender 结构通道到 AI 渲染的完整链路可行；多视图阶段证明了 MeshLock 式外部结构约束可以显著改善图像模型的结构漂移；全场景阶段则展示了从一句自然语言请求到概念图、模块参考、模块 3D、场景装配、白模通道和最终成图的完整原型链路。</p>
+<p>Harmonize3D 的核心贡献不在于某个单独图像模型或 3D 生成模型，而在于建立了一条可审计的 3D-grounded rendering 流程。最新运行表明，系统已经能够记录并复盘每个中间环节，同时也能明确指出最终图与概念图、白模位置不一致的问题。后续工作应围绕更强的模块 3D 质量控制、概念图对齐的相机选择、严格白模位置锁定的最终渲染，以及 VLM 参与的自动复核继续推进。</p>
 <h2 id="参考文献">参考文献</h2>
 <p>[1] Ho, J., Jain, A., and Abbeel, P. Denoising Diffusion Probabilistic Models. NeurIPS, 2020.</p>
 <p>[2] Rombach, R., Blattmann, A., Lorenz, D., Esser, P., and Ommer, B. High-Resolution Image Synthesis with Latent Diffusion Models. CVPR, 2022.</p>
@@ -173,4 +199,9 @@ figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
 <p>[5] Liu, R., Wu, R., Van Hoorick, B., Tokmakov, P., Zakharov, S., and Vondrick, C. Zero-1-to-3: Zero-shot One Image to 3D Object. ICCV, 2023.</p>
 <p>[6] Jun, H., and Nichol, A. Shap-E: Generating Conditional 3D Implicit Functions. arXiv, 2023.</p>
 <p>[7] Shi, Y., Wang, P., Ye, J., Long, M., Li, K., and Yang, X. MVDream: Multi-view Diffusion for 3D Generation. ICLR, 2024.</p>
-<p>[8] Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., and Cao, Y. ReAct: Synergizing Reasoning and Acting in Language Models. ICLR, 2023.</p></main></body></html>
+<p>[8] Liu, Y., Lin, C., Zeng, Z., Long, X., Liu, L., Komura, T., and Wang, W. SyncDreamer: Generating Multiview-consistent Images from a Single-view Image. arXiv, 2023.</p>
+<p>[9] Long, X., Guo, Y.-C., Lin, C., Liu, Y., Dou, Z., Ma, Y., Habermann, M., Theobalt, C., and Wang, W. Wonder3D: Single Image to 3D using Cross-Domain Diffusion. arXiv, 2023.</p>
+<p>[10] Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., and Cao, Y. ReAct: Synergizing Reasoning and Acting in Language Models. ICLR, 2023.</p>
+<p>[11] Cai, Q., Chen, J., Chen, Y., Li, Y., et al. HiDream-I1: A High-Efficient Image Generative Foundation Model with Sparse Diffusion Transformer. arXiv, 2025.</p>
+<p>[12] Cai, Q., Chen, J., Gao, C., Gong, Z., et al. HiDream-O1-Image: A Natively Unified Image Generative Foundation Model with Pixel-level Unified Transformer. arXiv, 2026.</p>
+<p>[13] Team Hunyuan3D. Hunyuan3D-Omni: A Unified Framework for Controllable Generation of 3D Assets. arXiv, 2025.</p></main></body></html>

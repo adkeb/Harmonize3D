@@ -161,7 +161,7 @@ AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "ai_candidate_search", "purpose": "optionally run local final geometry-locked AI rendering from render_manifest channels"},
     {"name": "module_presence_scoring", "purpose": "score module presence and position adherence"},
     {"name": "concept_final_comparison", "purpose": "compare the final render against the global concept image and flag obvious quality failures"},
-    {"name": "white_model_position_fit", "purpose": "post-fit final image2 foreground bbox to the white-model screen-space bbox before final position verification"},
+    {"name": "white_model_position_fit", "purpose": "write diagnostic fitted previews for image2 foreground bbox drift without accepting them as final renders"},
     {"name": "white_model_position_lock", "purpose": "compare final view images against Blender white-model views for screen-space layout drift"},
     {"name": "final_position_retry_plan", "purpose": "write a Codex image2 retry handoff when the final image drifts from the white-model position contract"},
     {"name": "image2_flow_audit", "purpose": "audit that real Auto Scene runs used model planning, Codex image2 handoff, model review, and reviewed-reference 3D AI"},
@@ -5682,11 +5682,11 @@ def _compute_white_model_position_lock_view(
         6,
     )
     checks = {
-        "bbox_iou": bbox["bbox_iou"] >= 0.42,
-        "center_alignment": bbox["center_alignment"] >= 0.70,
-        "scale_alignment": bbox["scale_alignment"] >= 0.55,
+        "bbox_iou": bbox["bbox_iou"] >= 0.86,
+        "center_alignment": bbox["center_alignment"] >= 0.86,
+        "scale_alignment": bbox["scale_alignment"] >= 0.80,
         "edge_f1": edge_f1 >= 0.28,
-        "total": total >= 0.58,
+        "total": total >= 0.74,
     }
     failures = [key for key, passed in checks.items() if not passed]
     overlay = _write_position_lock_overlay(
@@ -5879,8 +5879,9 @@ def fit_final_images_to_white_model_positions(
         "failed_views": failed,
         "items": items,
         "notes": [
-            "This is a generic post-image2 position fitting step.",
-            "It scales/translates the final image foreground bbox to the matching white-model bbox before the normal position lock verifier runs.",
+            "This is a diagnostic post-image2 position fitting preview.",
+            "It may create fitted copies under final/position_fitted, but those copies are not treated as final renders.",
+            "A complete Auto Scene result still requires the original final image2 outputs to pass white_model_position_lock against the Blender white-model channels.",
         ],
     }
     write_manifest(report_path, report)
@@ -6699,19 +6700,15 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
         final_view_images["view_hero"] = final_image
     white_model_position_fit = tool_executor.run(
         "white_model_position_fit",
-        {"final_view_images": final_view_images, "render_manifest": str(render_manifest_path), "mode": "in_place"},
+        {"final_view_images": final_view_images, "render_manifest": str(render_manifest_path), "mode": "diagnostic_copy"},
         lambda: fit_final_images_to_white_model_positions(
             final_view_images=final_view_images,
             render_manifest=render_manifest_path,
             output_report=workdir / "reports" / "white_model_position_fit.json",
             output_dir=final_dir / "position_fitted",
-            in_place=True,
+            in_place=False,
         ),
     )
-    if isinstance(white_model_position_fit.get("output_view_images"), dict) and white_model_position_fit["output_view_images"]:
-        final_view_images = {str(view_id): str(path) for view_id, path in white_model_position_fit["output_view_images"].items()}
-        if final_view_images.get("view_hero"):
-            final_image = final_view_images["view_hero"]
     hero_view = _render_hero_view(render_manifest_path) or {}
     hero_rgb = str(dict(hero_view.get("files", {})).get("rgb") or "")
     comparison_image = _write_labeled_contact_sheet(
@@ -6796,7 +6793,6 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
             and module_scores["total"] >= 0.75
             and sanity_summary["status"] == "pass"
             and white_model_position_contract["status"] == "pass"
-            and white_model_position_fit["status"] == "pass"
             and concept_final_comparison["status"] == "pass"
             and white_model_position_lock["status"] == "pass"
         )
@@ -6807,8 +6803,6 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     elif str(sanity_summary.get("status", "")).lower() != "pass":
         status = "needs_review"
     elif str(white_model_position_contract.get("status", "")).lower() != "pass":
-        status = "needs_review"
-    elif str(white_model_position_fit.get("status", "")).lower() != "pass":
         status = "needs_review"
     elif str(module_layout_check.get("status", "")).lower() != "pass":
         status = "needs_review"

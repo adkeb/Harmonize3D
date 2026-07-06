@@ -25,7 +25,7 @@ th, td { border: 1px solid var(--line); padding: 7px 8px; vertical-align: top; o
 th { background: #eef5fc; font-weight: 700; }
 figure { margin: 18px auto 24px; text-align: center; break-inside: avoid; }
 figure img { max-width: 100%; height: auto; border: 1px solid #e0e4e8; border-radius: 6px; }
-figcaption { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; text-align: center; }
 .toc { background:#f7f9fb; border:1px solid var(--line); border-radius:8px; padding: 10px 18px; margin: 20px 0 30px; break-after: page; }
 .toc h2 { border:0; margin: 4px 0 8px; }
 .toc ol { columns: 2; margin-left: 20px; }
@@ -157,10 +157,18 @@ def convert(markdown_path: Path) -> str:
         if image:
             close_list()
             caption, src = image.groups()
+            figcaption = "" if re.search(r"\.(png|jpe?g|webp|gif)$", caption, re.IGNORECASE) else f"<figcaption>{inline(caption)}</figcaption>"
             body.append(
                 f'<figure><img src="{html.escape(src)}" alt="{html.escape(caption)}">'
-                f"<figcaption>{inline(caption)}</figcaption></figure>"
+                f"{figcaption}</figure>"
             )
+            i += 1
+            continue
+
+        caption_line = re.match(r"^\*([^*]+)\*$", line.strip())
+        if caption_line:
+            close_list()
+            body.append(f'<p class="caption">{inline(caption_line.group(1).strip())}</p>')
             i += 1
             continue
 

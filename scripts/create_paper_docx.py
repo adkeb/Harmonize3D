@@ -437,7 +437,7 @@ def add_image(document: Document, markdown_path: Path, line: str) -> None:
     run = paragraph.add_run()
     run.add_picture(str(image_path), width=max_width)
 
-    if caption:
+    if caption and not re.search(r"\.(png|jpe?g|webp|gif)$", caption, re.IGNORECASE):
         cap = document.add_paragraph(style="H3D Caption")
         cap.paragraph_format.keep_together = True
         cap.add_run(caption)
@@ -445,6 +445,16 @@ def add_image(document: Document, markdown_path: Path, line: str) -> None:
             set_ea_font(run)
             run.font.size = Pt(9)
             run.font.color.rgb = MUTED
+
+
+def add_caption_paragraph(document: Document, text: str) -> None:
+    cap = document.add_paragraph(style="H3D Caption")
+    cap.paragraph_format.keep_together = True
+    cap.add_run(text)
+    for run in cap.runs:
+        set_ea_font(run)
+        run.font.size = Pt(9)
+        run.font.color.rgb = MUTED
 
 
 def add_code_block(document: Document, lines: list[str]) -> None:
@@ -542,6 +552,13 @@ def build_docx(markdown_path: Path, output_path: Path) -> None:
         if line.strip().startswith("!["):
             current_numbering_id = None
             add_image(document, markdown_path, line)
+            i += 1
+            continue
+
+        caption_match = re.match(r"^\*([^*]+)\*$", line.strip())
+        if caption_match:
+            current_numbering_id = None
+            add_caption_paragraph(document, caption_match.group(1).strip())
             i += 1
             continue
 

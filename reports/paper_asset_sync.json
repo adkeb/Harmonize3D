@@ -1,0 +1,28 @@
+{
+  "type": "paper_auto_scene_asset_sync",
+  "workdir": "/root/sakura/work/Harmonize3D/outputs/auto_scene/full_current_concept_source_v1",
+  "destinations": [
+    {
+      "path": "/root/sakura/work/Harmonize3D/docs/paper_assets",
+      "assets": {
+        "final_contact_sheet": "docs/paper_assets/final_contact_sheet.png",
+        "white_vs_final": "docs/paper_assets/white_vs_final.png",
+        "concept_vs_final": "docs/paper_assets/concept_vs_final.png",
+        "white_model_view_hero": "docs/paper_assets/white_model_view_hero.png",
+        "final_view_hero": "docs/paper_assets/final_view_hero.png",
+        "white_position_lock_overlay": "docs/paper_assets/white_position_lock_overlay.png"
+      }
+    },
+    {
+      "path": "/root/sakura/work/Harmonize3D/reports/paper_assets",
+      "assets": {
+        "final_contact_sheet": "reports/paper_assets/final_contact_sheet.png",
+        "white_vs_final": "reports/paper_assets/white_vs_final.png",
+        "concept_vs_final": "reports/paper_assets/concept_vs_final.png",
+        "white_model_view_hero": "reports/paper_assets/white_model_view_hero.png",
+        "final_view_hero": "reports/paper_assets/final_view_hero.png",
+        "white_position_lock_overlay": "reports/paper_assets/white_position_lock_overlay.png"
+      }
+    }
+  ]
+}
