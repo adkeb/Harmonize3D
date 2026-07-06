@@ -4705,13 +4705,13 @@ def _synthesize_final_image2_request_from_position_contract(
         contracts = [_position_contract_for_render_view(render_views[0])]
     for index, contract in enumerate(contracts, start=1):
         view_id = str(contract.get("view_id") or f"view_{index}")
-        if view_id not in {"view_hero", "view_locked"} and index > 1:
-            continue
         view = views_by_id.get(view_id) or (render_views[0] if render_views else {})
         input_images = _final_image_reference_inputs(view)
         if not input_images:
             continue
-        output_path = str(white_lock_report.get("final_image") or final_dir / _final_output_filename(view_id))
+        output_path = final_dir / _final_output_filename(view_id)
+        if view_id in {"view_hero", "view_locked"} and white_lock_report.get("final_image"):
+            output_path = Path(str(white_lock_report["final_image"]))
         prompt = _codex_image2_final_prompt(
             "Render a polished production image from the assembled 3D white-model scene while preserving the white-model layout exactly.",
             view_id=view_id,
@@ -5708,8 +5708,6 @@ def create_final_position_retry_plan(
     retry_requests: list[dict[str, Any]] = []
     for index, item in enumerate(original_requests, start=1):
         view_id = str(item.get("view_id") or f"view_{index}")
-        if view_id not in {"view_hero", "view_locked"} and index > 1:
-            continue
         contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else contracts_by_view.get(view_id, {})
         prompt_parts = [
             str(item.get("prompt") or ""),
@@ -5753,6 +5751,7 @@ def create_final_position_retry_plan(
         "request_path": str(retry_request_path.resolve()),
         "codex_image2_handoff": str(handoff_path.resolve()),
         "reference_policy": "white_model_position_locked_render_channels_only",
+        "retry_scope": "all_final_request_views",
         "original_request": _absolute_artifact_path(request_path),
         "white_model_position_contract": _absolute_artifact_path(position_contract_path),
         "white_model_position_lock": white_lock_report,

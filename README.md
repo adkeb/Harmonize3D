@@ -24,7 +24,7 @@ The paper has been updated with the June 18, 2026 Auto Scene run. This run valid
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally recorded as `needs_review`, not `pass`, because the full three-view scene has not been re-rendered end to end after the retry pass. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 hero retry now preserves the white-model hero position: `white_model_position_lock` passes with total `0.708514`, the concept/final comparison passes, and `final_position_retry_plan` reports `not_needed` for the hero view. The remaining engineering target is applying the same corrected loop to the side views and rerunning the complete multi-view Auto Scene package.
+Current status is intentionally recorded as `needs_review`, not `pass`, because the full three-view scene has not been re-rendered end to end after the retry pass. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 hero retry now preserves the white-model hero position: `white_model_position_lock` passes with total `0.708514`, the concept/final comparison passes, and `final_position_retry_plan` reports `not_needed` for the hero view. The retry planner now preserves all final-render request views instead of only the hero request, so left/right side views can be handed to Codex image2 with the same white-model position contracts. The remaining engineering target is running the complete multi-view Auto Scene package with corrected side-view outputs and validating the resulting contact sheet.
 
 ![Latest module references](docs/paper_assets/module_references_contact.png)
 
@@ -193,7 +193,7 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-plan-position-retry 
   --workdir outputs/auto_scene/demo_showroom
 ```
 
-When `reports/final_position_retry_plan.json` reports `awaiting_codex_image2_retry`, the corrected final-render loop can be resumed from the workdir. The command reads the retry request, imports the latest Codex image2 result, then reruns the same Auto Scene workdir with the original task options from `auto_task.json`/`auto_scene_summary.json`:
+When `reports/final_position_retry_plan.json` reports `awaiting_codex_image2_retry`, the corrected final-render loop can be resumed from the workdir. The retry request covers every final-render request view that has render-channel inputs, including `view_hero`, `view_left_30`, and `view_right_30` when present. The command reads the retry request, imports the latest Codex image2 result(s), then reruns the same Auto Scene workdir with the original task options from `auto_task.json`/`auto_scene_summary.json`:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
@@ -202,7 +202,7 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-run-position-retry \
 
 Use `--dry-plan` to print the retry request and handoff without changing files, or `--import-only` when you only want to copy the latest Codex image2 outputs into the retry request before a manual rerun.
 
-If an older/local run produced a final image without `final/codex_image2_final_request.json`, the retry planner now synthesizes that missing request from `reports/white_model_position_contract.json` and `renders/render_manifest.json`, keeping only white-model render channels as final image2 inputs.
+If an older/local run produced a final image without `final/codex_image2_final_request.json`, the retry planner now synthesizes that missing request from `reports/white_model_position_contract.json` and `renders/render_manifest.json`, keeping only white-model render channels as final image2 inputs. Synthesized requests keep separate output paths per view, so side-view retries do not overwrite `final/final_view_hero.png`.
 
 Real non-mock runs also package `reports/image2_flow_audit.json`. To rerun the same audit manually after a run advances past module generation:
 
