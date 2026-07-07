@@ -273,6 +273,30 @@ def camera_position_from_state(camera_state: dict[str, object], base_distance: f
     )
 
 
+def camera_state_with_yaw_offset(camera_state: dict[str, object], base_distance: float, yaw_offset_deg: float) -> dict[str, object]:
+    view_state = dict(camera_state)
+    view_state["yaw_offset_deg"] = yaw_offset_deg
+    if "azimuth_deg" in view_state:
+        view_state["azimuth_deg"] = (float(view_state.get("azimuth_deg", 0.0)) + yaw_offset_deg) % 360.0
+    target_values = camera_state.get("target", [0.0, 0.0, 0.05])
+    if not isinstance(target_values, list | tuple) or len(target_values) != 3:
+        target_values = [0.0, 0.0, 0.05]
+    target = Vector((float(target_values[0]), float(target_values[1]), float(target_values[2])))
+    location = camera_position_from_state(camera_state, base_distance)
+    if yaw_offset_deg:
+        rel = location - target
+        angle = math.radians(yaw_offset_deg)
+        location = target + Vector(
+            (
+                rel.x * math.cos(angle) - rel.y * math.sin(angle),
+                rel.x * math.sin(angle) + rel.y * math.cos(angle),
+                rel.z,
+            )
+        )
+    view_state["position"] = [round(float(location.x), 6), round(float(location.y), 6), round(float(location.z), 6)]
+    return view_state
+
+
 def load_camera_state(raw: str) -> dict[str, object] | None:
     if not raw:
         return None
@@ -466,6 +490,7 @@ def main() -> None:
                 ("view_right_30", -30.0),
             ]
             for view_id, yaw_offset in locked_specs:
+                view_camera = camera_state_with_yaw_offset(fixed_camera, args.camera_distance, yaw_offset)
                 files = render_locked_view(
                     output,
                     camera,
@@ -478,7 +503,7 @@ def main() -> None:
                 manifest["views"].append(
                     {
                         "view_id": view_id,
-                        "camera": fixed_camera,
+                        "camera": view_camera,
                         "yaw_offset_deg": yaw_offset,
                         "files": files,
                     }

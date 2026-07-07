@@ -1663,6 +1663,83 @@ class AutoSceneTest(unittest.TestCase):
             self.assertLess(float(mask.mean()), 0.5)
             self.assertEqual(bbox, [0.234375, 0.328125, 0.789062, 0.710938])
 
+    def test_white_model_position_contract_flags_edge_cropped_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_left_30"
+            view_dir.mkdir(parents=True)
+            rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(rgb).rectangle((0, 32, 127, 96), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).rectangle((0, 32, 127, 96), fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            edge = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(edge).rectangle((0, 32, 127, 96), outline=255, width=3)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            render_manifest = write_manifest(
+                root / "renders" / "render_manifest.json",
+                {"views": [{"view_id": "view_left_30", "files": {"rgb": str(rgb_path), "mask": str(mask_path), "edge": str(edge_path)}}]},
+            )
+
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+
+            self.assertEqual(contract["status"], "needs_review")
+            self.assertEqual(contract["framing_review"]["status"], "needs_camera_review")
+            self.assertEqual(contract["framing_review"]["failed_views"], ["view_left_30"])
+            framing_quality = contract["contracts"][0]["framing_quality"]
+            self.assertTrue(framing_quality["camera_retry_recommended"])
+            self.assertIn("foreground_touches_left_edge", framing_quality["failure_reasons"])
+            self.assertIn("foreground_touches_right_edge", framing_quality["failure_reasons"])
+
+    def test_final_position_retry_plan_blocks_image2_when_white_model_framing_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_left_30"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(image).rectangle((0, 32, 127, 96), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_left_30", "files": files}]})
+            create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            white_lock_report = {
+                "type": "white_model_position_lock",
+                "status": "needs_review",
+                "failure_reasons": ["bbox_iou"],
+                "view_reports": [{"view_id": "view_left_30", "failure_reasons": ["bbox_iou"], "metrics": {"total": 0.4}}],
+            }
+
+            retry = create_final_position_retry_plan(
+                workdir=root,
+                final_request_path=root / "final" / "codex_image2_final_request.json",
+                white_lock_report=white_lock_report,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+                output_report=root / "reports" / "final_position_retry_plan.json",
+            )
+
+            self.assertEqual(retry["status"], "camera_retry_required")
+            self.assertEqual(retry["reason"], "white_model_view_framing_needs_camera_review")
+            self.assertEqual(retry["request_count"], 0)
+            self.assertEqual(retry["failed_views"], ["view_left_30"])
+            self.assertNotIn("retry_request", retry)
+
     def test_fit_final_image_to_white_model_position_restores_bbox_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

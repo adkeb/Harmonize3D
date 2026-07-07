@@ -485,6 +485,8 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
                 "enabled": True,
                 "status": position_contract.get("status", ""),
                 "contract_count": position_contract.get("contract_count", 0),
+                "framing_status": position_contract.get("framing_review", {}).get("status", "") if isinstance(position_contract.get("framing_review"), dict) else "",
+                "camera_retry_required": bool(position_contract.get("framing_review", {}).get("camera_retry_required")) if isinstance(position_contract.get("framing_review"), dict) else False,
             }
             capabilities["white_model_position_lock"] = {
                 "enabled": True,
@@ -504,6 +506,8 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
         "final_image": str(final_image),
         "white_model_position_contract": str(position_contract_path),
         "white_model_position_contract_status": position_contract.get("status", ""),
+        "white_model_framing_status": position_contract.get("framing_review", {}).get("status", "") if isinstance(position_contract.get("framing_review"), dict) else "",
+        "camera_retry_required": bool(position_contract.get("framing_review", {}).get("camera_retry_required")) if isinstance(position_contract.get("framing_review"), dict) else False,
         "white_model_position_lock": str(position_lock_path),
         "white_model_position_lock_status": position_lock.get("status", ""),
         "final_position_retry_plan": str(retry_plan_path),
@@ -512,7 +516,7 @@ def cmd_auto_scene_plan_position_retry(args: argparse.Namespace) -> int:
         "codex_image2_handoff": retry_plan.get("codex_image2_handoff", ""),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if retry_plan.get("status") in {"awaiting_codex_image2_retry", "not_needed"} or args.allow_not_applicable else 2
+    return 0 if retry_plan.get("status") in {"awaiting_codex_image2_retry", "not_needed", "camera_retry_required"} or args.allow_not_applicable else 2
 
 
 def cmd_auto_scene_fit_position_lock(args: argparse.Namespace) -> int:

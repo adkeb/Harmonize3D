@@ -4365,6 +4365,8 @@ def select_scene_camera(
         view = copy.deepcopy(selected_camera)
         view["view_id"] = view_id
         view["role"] = role
+        view["source_camera_azimuth_deg"] = float(selected_camera.get("azimuth_deg", 0.0))
+        view["azimuth_deg"] = (float(selected_camera.get("azimuth_deg", 0.0)) + yaw) % 360.0
         view["yaw_offset_deg"] = yaw
         optimized_views.append(view)
     optimized_plan = {
@@ -4635,6 +4637,7 @@ def _position_contract_for_render_view(view: dict[str, Any]) -> dict[str, Any]:
     x0, y0, x1, y1 = bbox
     width = max(1e-6, x1 - x0)
     height = max(1e-6, y1 - y0)
+    framing_quality = _position_contract_framing_quality(bbox, coverage_ratio=float(mask.mean()))
     return {
         "view_id": view_id,
         "status": "pass",
@@ -4646,11 +4649,125 @@ def _position_contract_for_render_view(view: dict[str, Any]) -> dict[str, Any]:
         "size_norm": [round(float(width), 6), round(float(height), 6)],
         "coverage_ratio": round(float(mask.mean()), 6),
         "aspect_ratio": round(float(width / max(height, 1e-6)), 6),
+        "framing_quality": framing_quality,
         "rules": [
             "Preserve this normalized foreground bbox, center, coverage, crop, camera, silhouette, and module ordering.",
             "Apply production materials, lighting, reflections, color, and surface finish over the fixed white-model structure.",
             "Use the listed render channels as the only final-render image inputs.",
         ],
+    }
+
+
+def _unique_reasons(reasons: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for reason in reasons:
+        if reason and reason not in seen:
+            seen.add(reason)
+            output.append(reason)
+    return output
+
+
+def _position_contract_framing_quality(bbox: list[float], *, coverage_ratio: float) -> dict[str, Any]:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return {"status": "not_available", "failure_reasons": ["missing_bbox"], "camera_retry_recommended": False}
+    x0, y0, x1, y1 = [max(0.0, min(1.0, float(value))) for value in bbox]
+    margins = {
+        "left": x0,
+        "top": y0,
+        "right": max(0.0, 1.0 - x1),
+        "bottom": max(0.0, 1.0 - y1),
+    }
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    floor_band_like = y0 >= 0.52 and height <= 0.48
+    edge_touch = 0.005
+    recommended_horizontal_margin = 0.02
+    recommended_top_margin = 0.035
+    failure_reasons: list[str] = []
+    warnings: list[str] = []
+    for side in ("left", "right"):
+        if margins[side] <= edge_touch:
+            if floor_band_like:
+                warnings.append(f"foreground_touches_{side}_edge")
+            else:
+                failure_reasons.append(f"foreground_touches_{side}_edge")
+        elif margins[side] < recommended_horizontal_margin:
+            warnings.append(f"tight_{side}_margin")
+    if margins["top"] <= edge_touch:
+        failure_reasons.append("foreground_touches_top_edge")
+    elif margins["top"] < recommended_top_margin:
+        warnings.append("tight_top_margin")
+    if margins["bottom"] <= edge_touch:
+        warnings.append("foreground_touches_bottom_edge")
+    if width >= 0.985 and (margins["left"] <= edge_touch or margins["right"] <= edge_touch):
+        if floor_band_like:
+            warnings.append("horizontal_bbox_spans_frame")
+        else:
+            failure_reasons.append("horizontal_bbox_spans_frame")
+    if height >= 0.985 and (margins["top"] <= edge_touch or margins["bottom"] <= edge_touch):
+        warnings.append("vertical_bbox_spans_frame")
+    if coverage_ratio >= 0.82:
+        warnings.append("foreground_coverage_very_high")
+    failure_reasons = _unique_reasons(failure_reasons)
+    warnings = _unique_reasons(warnings)
+    framing_score = (
+        min(1.0, margins["left"] / recommended_horizontal_margin) * 0.22
+        + min(1.0, margins["right"] / recommended_horizontal_margin) * 0.22
+        + min(1.0, margins["top"] / recommended_top_margin) * 0.18
+        + min(1.0, max(margins["bottom"], edge_touch) / recommended_horizontal_margin) * 0.08
+        + max(0.0, 1.0 - max(0.0, width - 0.92) / 0.08) * 0.18
+        + max(0.0, 1.0 - max(0.0, height - 0.92) / 0.08) * 0.12
+    )
+    status = "needs_camera_review" if failure_reasons else "pass"
+    return {
+        "status": status,
+        "camera_retry_recommended": bool(failure_reasons),
+        "failure_reasons": failure_reasons,
+        "warnings": warnings,
+        "margins_norm": {key: round(float(value), 6) for key, value in margins.items()},
+        "bbox_size_norm": [round(float(width), 6), round(float(height), 6)],
+        "floor_band_like": floor_band_like,
+        "framing_score": round(float(framing_score), 6),
+        "policy": "white_model_views_must_not_be_edge_cropped_before_final_image2_render",
+    }
+
+
+def _position_contract_framing_review(contracts: list[dict[str, Any]]) -> dict[str, Any]:
+    failed_views: list[str] = []
+    warning_views: list[str] = []
+    view_reports: list[dict[str, Any]] = []
+    for contract in contracts:
+        view_id = str(contract.get("view_id") or "")
+        quality = contract.get("framing_quality") if isinstance(contract.get("framing_quality"), dict) else {}
+        if not quality:
+            continue
+        failures = [str(reason) for reason in quality.get("failure_reasons", [])]
+        warnings = [str(reason) for reason in quality.get("warnings", [])]
+        if quality.get("camera_retry_recommended"):
+            failed_views.append(view_id)
+        elif warnings:
+            warning_views.append(view_id)
+        view_reports.append(
+            {
+                "view_id": view_id,
+                "status": quality.get("status", ""),
+                "camera_retry_recommended": bool(quality.get("camera_retry_recommended")),
+                "failure_reasons": failures,
+                "warnings": warnings,
+                "margins_norm": quality.get("margins_norm", {}),
+                "bbox_size_norm": quality.get("bbox_size_norm", []),
+                "floor_band_like": bool(quality.get("floor_band_like")),
+                "framing_score": quality.get("framing_score", 0.0),
+            }
+        )
+    return {
+        "status": "needs_camera_review" if failed_views else "pass",
+        "camera_retry_required": bool(failed_views),
+        "failed_views": failed_views,
+        "warning_views": warning_views,
+        "view_reports": view_reports,
+        "policy": "final_image2_is_blocked_when_white_model_views_are_edge_cropped",
     }
 
 
@@ -4699,13 +4816,16 @@ def create_white_model_position_contract(
     views = _render_view_requests(render_manifest, max_views=min(3, int(output_views or 1)))
     contracts = [_position_contract_for_render_view(view) for view in views]
     overlay = _write_position_contract_overlay(contracts, output_image)
-    status = "pass" if contracts and all(item.get("status") == "pass" for item in contracts) else "needs_review"
+    framing_review = _position_contract_framing_review(contracts)
+    contract_status_pass = contracts and all(item.get("status") == "pass" for item in contracts)
+    status = "pass" if contract_status_pass and framing_review.get("status") == "pass" else "needs_review"
     report = {
         "type": "white_model_position_contract",
         "status": status,
         "render_manifest": _absolute_artifact_path(render_manifest),
         "contract_count": len(contracts),
         "contracts": contracts,
+        "framing_review": framing_review,
         "overlay_image": _absolute_artifact_path(overlay),
         "policy": "final_image2_must_preserve_white_model_screen_space_contract",
     }
@@ -4823,6 +4943,14 @@ def _position_contract_by_view(position_contract_path: str | Path | None) -> dic
         if isinstance(item, dict) and item.get("view_id"):
             output[str(item["view_id"])] = item
     return output
+
+
+def _position_contract_framing_review_from_path(position_contract_path: str | Path | None) -> dict[str, Any]:
+    if not position_contract_path or not Path(position_contract_path).exists():
+        return {}
+    report = read_manifest(position_contract_path)
+    review = report.get("framing_review")
+    return review if isinstance(review, dict) else {}
 
 
 def _white_lock_view_report(white_lock_report: dict[str, Any], view_id: str) -> dict[str, Any]:
@@ -6091,6 +6219,26 @@ def create_final_position_retry_plan(
     final_dir = Path(workdir) / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
     status = str(white_lock_report.get("status") or "")
+    framing_review = _position_contract_framing_review_from_path(position_contract_path)
+    if framing_review.get("camera_retry_required"):
+        report = {
+            "type": "final_position_retry_plan",
+            "status": "camera_retry_required",
+            "reason": "white_model_view_framing_needs_camera_review",
+            "white_model_position_lock": white_lock_report,
+            "position_contract": _absolute_artifact_path(position_contract_path),
+            "white_model_position_contract": _absolute_artifact_path(position_contract_path),
+            "contract_framing_review": framing_review,
+            "failed_views": framing_review.get("failed_views", []),
+            "request_count": 0,
+            "instruction": (
+                "Do not accept or import a new final image2 render for these views yet. "
+                "Rerun camera selection and Blender white-model channel rendering until the white-model position contract framing review passes, "
+                "then create the final Codex image2 render from the corrected render_manifest channels."
+            ),
+        }
+        write_manifest(report_path, report)
+        return report
     request_path = Path(final_request_path) if final_request_path and Path(final_request_path).exists() else None
     if status == "pass":
         report = {
@@ -6280,6 +6428,7 @@ def create_final_position_retry_plan(
         "codex_image2_handoff": _absolute_artifact_path(handoff_path),
         "white_model_position_contract": _absolute_artifact_path(position_contract_path),
         "white_model_position_lock_status": status,
+        "contract_framing_review": framing_review,
         "failure_reasons": white_lock_report.get("failure_reasons", []),
         "request_count": len(retry_requests),
     }
@@ -6987,6 +7136,12 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
                 "enabled": True,
                 "status": white_model_position_contract.get("status", ""),
                 "contract_count": white_model_position_contract.get("contract_count", 0),
+                "framing_status": white_model_position_contract.get("framing_review", {}).get("status", "")
+                if isinstance(white_model_position_contract.get("framing_review"), dict)
+                else "",
+                "camera_retry_required": bool(white_model_position_contract.get("framing_review", {}).get("camera_retry_required"))
+                if isinstance(white_model_position_contract.get("framing_review"), dict)
+                else False,
             },
             "white_model_position_fit": {
                 "enabled": True,
