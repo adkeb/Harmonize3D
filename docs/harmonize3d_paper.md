@@ -205,7 +205,7 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -> 模块参考 -> 模块 3D -> 3D 场景组装 -> Blender 白模通道 -> 最终 AI 渲染”，同时也暴露出论文资产管理本身需要纳入流程：最终图不能只依赖人工复制的旧文件，而应从当前 workdir、render manifest 和位置锁定报告中可复现生成。
 
-在当前三视角工作目录中，原始最终图的 `white_model_position_lock` 为 `needs_review`，pass rate 为 0.333333；失败集中在 `view_left_30` 的 center alignment 和 `view_right_30` 的 total score。`final_position_retry_plan` 因此返回 `awaiting_codex_image2_retry`，并为 `view_hero`、`view_left_30`、`view_right_30` 三个视角生成新的 Codex image2 请求。`white_model_position_fit` 仍可生成诊断预览，但它不再覆盖 `final_view_*.png`，也不再参与 complete 判定。
+在当前三视角工作目录中，原始最终图的 `white_model_position_lock` 为 `needs_review`，pass rate 为 0.0；`view_hero` 失败于 bbox IoU、center alignment 和 total score，`view_left_30` 失败于 bbox IoU、center alignment 和 total score，`view_right_30` 失败于 bbox IoU、center alignment、scale alignment 和 total score。这说明当前成品图候选仍没有按 Blender 白模位置完成渲染，不能进入最终成品。`final_position_retry_plan` 因此返回 `awaiting_codex_image2_retry`，并为 `view_hero`、`view_left_30`、`view_right_30` 三个视角生成新的 Codex image2 请求；请求把 `white_model_rgb_position_lock` 作为严格 paint-over 编辑画布，携带每个视角自己的失败指标，并继续禁止 `negative_prompt` 字段。`white_model_position_fit` 仍可生成诊断预览，但它不再覆盖 `final_view_*.png`，也不再参与 complete 判定。
 
 ![concept_vs_final.png](paper_assets/concept_vs_final.png)
 

@@ -1863,7 +1863,10 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(item["kind"], "final_render_position_retry")
             self.assertIn("center_alignment", item["prompt"])
             self.assertIn("Binding screen-space target", item["prompt"])
+            self.assertIn("paint-over canvas", item["prompt"])
+            self.assertIn("same pixel positions", item["prompt"])
             self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
+            self.assertEqual(item["strict_edit_target_lock"], "white_model_rgb_position_lock_paint_over_canvas")
             self.assertTrue(item["few_shot_position_lock_examples"])
             roles = {entry["role"] for entry in item["input_images"]}
             self.assertIn("white_model_rgb_position_lock", roles)
@@ -1872,6 +1875,7 @@ class AutoSceneTest(unittest.TestCase):
             self.assertTrue(Path(retry["codex_image2_handoff"]).exists())
             handoff_text = Path(retry["codex_image2_handoff"]).read_text(encoding="utf-8")
             self.assertIn("Edit target role", handoff_text)
+            self.assertIn("Strict edit-target lock", handoff_text)
             self.assertIn("Few-shot position-lock examples", handoff_text)
 
     def test_final_position_retry_plan_includes_all_final_request_views(self) -> None:
@@ -1930,6 +1934,11 @@ class AutoSceneTest(unittest.TestCase):
                 "final_image": str(root / "final" / "final_view_hero.png"),
                 "metrics": {"center_alignment": 0.2, "scale_alignment": 0.4},
                 "failure_reasons": ["center_alignment", "scale_alignment"],
+                "view_reports": [
+                    {"view_id": "view_hero", "metrics": {"bbox_iou": 0.81}, "failure_reasons": ["bbox_iou"]},
+                    {"view_id": "view_left_30", "metrics": {"center_alignment": 0.66}, "failure_reasons": ["center_alignment"]},
+                    {"view_id": "view_right_30", "metrics": {"scale_alignment": 0.57}, "failure_reasons": ["scale_alignment"]},
+                ],
             }
 
             retry = create_final_position_retry_plan(
@@ -1952,8 +1961,14 @@ class AutoSceneTest(unittest.TestCase):
                 self.assertIn("edge_silhouette_lock", roles)
                 self.assertIn("white-model", item["prompt"])
                 self.assertIn("Binding screen-space target", item["prompt"])
+                self.assertIn("paint-over canvas", item["prompt"])
+                self.assertIn("Previous position check metrics for this view", item["prompt"])
                 self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
+                self.assertEqual(item["strict_edit_target_lock"], "white_model_rgb_position_lock_paint_over_canvas")
                 self.assertTrue(item["few_shot_position_lock_examples"])
+                if item["view_id"] == "view_right_30":
+                    self.assertEqual(item["position_lock"]["failure_reasons"], ["scale_alignment"])
+                    self.assertIn("'scale_alignment': 0.57", item["prompt"])
             self.assertIn("view_left_30=/path/to/codex-image2-output-2.png", Path(retry["codex_image2_handoff"]).read_text(encoding="utf-8"))
             self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
 

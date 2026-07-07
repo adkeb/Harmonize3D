@@ -1338,6 +1338,13 @@ def _write_codex_image2_handoff(
                     "",
                 ]
             )
+        if item.get("strict_edit_target_lock"):
+            lines.extend(
+                [
+                    f"- Strict edit-target lock: `{item.get('strict_edit_target_lock')}`",
+                    "",
+                ]
+            )
         examples = item.get("few_shot_position_lock_examples")
         if isinstance(examples, list) and examples:
             lines.extend(["Few-shot position-lock examples:", ""])
@@ -4530,6 +4537,14 @@ def _final_output_filename(view_id: str) -> str:
     return f"final_{normalized}.png"
 
 
+def _strict_white_model_edit_target_clause() -> str:
+    return (
+        "Strict edit-target lock: treat the white_model_rgb_position_lock image as a paint-over canvas from the assembled 3D scene. "
+        "Keep the white-model foreground mask occupancy, silhouette edge locations, object count, module contact points, visible gaps, empty margins, and crop at the same pixel positions. "
+        "Apply final materials, lighting, reflections, color, and texture within those existing occupied regions while retaining the original camera framing and module overlaps."
+    )
+
+
 def _codex_image2_final_prompt(base_prompt: str, *, view_id: str) -> str:
     prompt = " ".join(str(base_prompt or "").split())
     geometry_lock = (
@@ -4539,9 +4554,10 @@ def _codex_image2_final_prompt(base_prompt: str, *, view_id: str) -> str:
         "Render materials, lighting, color, surface finish, reflections, and production polish over the fixed white-model structure. "
         "The output scene structure is exactly the visible assembled 3D scene from the reference channels, with the main subject clear and visually dominant."
     )
+    strict_edit_target_lock = _strict_white_model_edit_target_clause()
     if prompt:
-        return f"{prompt}\n\n{geometry_lock}\n\nView id: {view_id}."
-    return f"{geometry_lock}\n\nView id: {view_id}."
+        return f"{prompt}\n\n{geometry_lock}\n\n{strict_edit_target_lock}\n\nView id: {view_id}."
+    return f"{geometry_lock}\n\n{strict_edit_target_lock}\n\nView id: {view_id}."
 
 
 def _render_view_requests(render_manifest_path: str | Path, *, max_views: int) -> list[dict[str, Any]]:
@@ -4809,6 +4825,13 @@ def _position_contract_by_view(position_contract_path: str | Path | None) -> dic
     return output
 
 
+def _white_lock_view_report(white_lock_report: dict[str, Any], view_id: str) -> dict[str, Any]:
+    for item in white_lock_report.get("view_reports", []):
+        if isinstance(item, dict) and str(item.get("view_id") or "") == view_id:
+            return item
+    return {}
+
+
 def _render_views_by_id_from_position_contract(position_contract_path: str | Path | None) -> dict[str, dict[str, Any]]:
     if not position_contract_path or not Path(position_contract_path).exists():
         return {}
@@ -4846,7 +4869,7 @@ def _position_contract_boundary_clause(contract: dict[str, Any]) -> str:
         f"Foreground left/right/top/bottom boundaries remain at normalized bbox [{x0}, {y0}, {x1}, {y1}], "
         f"with center {center} and coverage {coverage}. "
         "Material, lighting, color, reflections, and surface detail are applied within the existing white-model silhouettes. "
-        "Background, empty regions, crop, visible object count, module overlaps, and foreground/background order remain aligned to the edit target."
+        "Background, empty regions, crop, visible object count, module overlaps, contact points, silhouette edge locations, and foreground/background order remain aligned to the edit target."
     )
 
 
@@ -4854,11 +4877,15 @@ def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
     return [
         {
             "failure_pattern": "The generated product render expands the car and platform into a full hero composition while the side-view white model has a lower, narrower foreground bbox.",
-            "corrected_instruction": "Use the white_model_rgb_position_lock image as the edit target, keep the original bbox top/bottom/left/right boundaries, and apply polished material inside those existing silhouettes.",
+            "corrected_instruction": "Use the white_model_rgb_position_lock image as a paint-over canvas, keep the original bbox top/bottom/left/right boundaries and empty margins at the same pixel positions, and apply polished material inside those existing silhouettes.",
         },
         {
             "failure_pattern": "The generated render changes foreground/background order by moving the robotic arm or panels to a cleaner marketing layout.",
-            "corrected_instruction": "Keep the robotic arm, panels, platform, car, and light bars at the same screen-space positions and overlaps as the white-model edit target, then add lighting and surface finish.",
+            "corrected_instruction": "Keep the robotic arm, panels, platform, car, and light bars at the same screen-space positions, contact points, and overlaps as the white-model edit target, then add lighting and surface finish.",
+        },
+        {
+            "failure_pattern": "The generated render visually improves the scene but changes the car-arm spacing, stand height, or visible gap sizes compared with the white-model channels.",
+            "corrected_instruction": "Trace the white-model mask occupancy and silhouette edges first, preserve the existing car-arm spacing, stand height, visible gap sizes, and crop, then materialize the same occupied pixels as the finished scene.",
         },
     ]
 
@@ -6102,14 +6129,18 @@ def create_final_position_retry_plan(
     for index, item in enumerate(original_requests, start=1):
         view_id = str(item.get("view_id") or f"view_{index}")
         contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else contracts_by_view.get(view_id, {})
+        view_report = _white_lock_view_report(white_lock_report, view_id)
+        view_metrics = view_report.get("metrics", white_lock_report.get("metrics", {}))
+        view_failure_reasons = view_report.get("failure_reasons", white_lock_report.get("failure_reasons", []))
         prompt_parts = [
             str(item.get("prompt") or ""),
             "Use the white_model_rgb_position_lock input image as the edit target and binding white-model layout.",
+            _strict_white_model_edit_target_clause(),
             _position_contract_boundary_clause(contract),
             "Position-lock correction pass: preserve the white-model contract as the exact screen-space target.",
             f"Target bbox {contract.get('bbox_norm', [])}, center {contract.get('center_norm', [])}, coverage {contract.get('coverage_ratio', '')}.",
-            f"Previous position check metrics: {white_lock_report.get('metrics', {})}.",
-            f"Correction focus: {white_lock_report.get('failure_reasons', [])}.",
+            f"Previous position check metrics for this view: {view_metrics}.",
+            f"Correction focus for this view: {view_failure_reasons}.",
             "Keep the same crop, perspective, foreground/background order, object overlaps, module positions, relative scale, silhouette, and visible object count from the white-model channels.",
         ]
         retry_item = {
@@ -6122,12 +6153,13 @@ def create_final_position_retry_plan(
             "prompt": "\n\n".join(part for part in prompt_parts if part),
             "input_images": item.get("input_images", []),
             "edit_target_role": "white_model_rgb_position_lock",
+            "strict_edit_target_lock": "white_model_rgb_position_lock_paint_over_canvas",
             "few_shot_position_lock_examples": _final_position_retry_few_shot_examples(),
             "position_lock": {
                 **(item.get("position_lock") if isinstance(item.get("position_lock"), dict) else {}),
                 "retry_policy": "correct_to_white_model_position_contract",
                 "white_model_position_lock_status": status,
-                "failure_reasons": white_lock_report.get("failure_reasons", []),
+                "failure_reasons": view_failure_reasons,
             },
             "position_lock_contract": contract,
             "previous_final_image": final_view_images_for_retry.get(view_id, white_lock_report.get("final_image", "")),
