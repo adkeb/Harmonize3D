@@ -244,6 +244,44 @@ def save_render(path: Path) -> None:
     bpy.ops.render.render(write_still=True)
 
 
+def save_edge_from_mask(mask_path: Path, edge_path: Path) -> None:
+    mask_image = bpy.data.images.load(str(mask_path), check_existing=False)
+    width, height = mask_image.size
+    pixels = [0.0] * (width * height * 4)
+    mask_image.pixels.foreach_get(pixels)
+    occupied = [False] * (width * height)
+    for index in range(width * height):
+        occupied[index] = pixels[index * 4] > 0.35
+    edge_pixels = [0.0] * (width * height * 4)
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            idx = row + x
+            if not occupied[idx]:
+                continue
+            edge = x == 0 or y == 0 or x == width - 1 or y == height - 1
+            if not edge:
+                edge = (
+                    not occupied[idx - 1]
+                    or not occupied[idx + 1]
+                    or not occupied[idx - width]
+                    or not occupied[idx + width]
+                )
+            if edge:
+                base = idx * 4
+                edge_pixels[base] = 1.0
+                edge_pixels[base + 1] = 1.0
+                edge_pixels[base + 2] = 1.0
+                edge_pixels[base + 3] = 1.0
+    edge_image = bpy.data.images.new("mask_silhouette_edge", width=width, height=height, alpha=True)
+    edge_image.pixels.foreach_set(edge_pixels)
+    edge_image.filepath_raw = str(edge_path)
+    edge_image.file_format = "PNG"
+    edge_image.save()
+    bpy.data.images.remove(mask_image)
+    bpy.data.images.remove(edge_image)
+
+
 def ensure_freestyle_line_set() -> None:
     view_layer = bpy.context.scene.view_layers[0]
     if not view_layer.freestyle_settings.linesets:
@@ -336,11 +374,8 @@ def render_channels(
     mask_path = view_dir / "mask.png"
     save_render(mask_path)
 
-    scene.render.use_freestyle = True
-    ensure_freestyle_line_set()
     edge_path = view_dir / "edge.png"
-    save_render(edge_path)
-    scene.render.use_freestyle = False
+    save_edge_from_mask(mask_path, edge_path)
 
     assign_normal_material()
     normal_path = view_dir / "normal.png"

@@ -13,6 +13,7 @@ from local3dai.auto_scene import (
     ExternalImagegenRequired,
     SceneToolExecutor,
     _binary_bbox,
+    _camera_plan_for_framing_retry,
     _extract_concept_camera_target,
     _mask_from_channel,
     _module_reference_prompt_with_safety,
@@ -1739,6 +1740,60 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(retry["request_count"], 0)
             self.assertEqual(retry["failed_views"], ["view_left_30"])
             self.assertNotIn("retry_request", retry)
+
+    def test_camera_plan_for_framing_retry_widens_all_views(self) -> None:
+        camera_plan = {
+            "views": [
+                {"view_id": "view_hero", "camera_type": "perspective", "azimuth_deg": 305.0, "distance_scale": 0.8, "focal_length_mm": 58.0},
+                {"view_id": "view_left_30", "camera_type": "perspective", "azimuth_deg": 305.0, "yaw_offset_deg": 30.0, "distance_scale": 0.8, "focal_length_mm": 58.0},
+                {"view_id": "view_right_30", "camera_type": "perspective", "azimuth_deg": 305.0, "yaw_offset_deg": -30.0, "distance_scale": 0.8, "focal_length_mm": 58.0},
+            ]
+        }
+        framing_review = {"camera_retry_required": True, "failed_views": ["view_left_30"]}
+
+        retry_plan = _camera_plan_for_framing_retry(camera_plan, framing_review, attempt=1)
+
+        self.assertEqual(retry_plan["camera_framing_retry"]["failed_views"], ["view_left_30"])
+        self.assertGreater(retry_plan["views"][0]["distance_scale"], camera_plan["views"][0]["distance_scale"])
+        self.assertLess(retry_plan["views"][0]["focal_length_mm"], camera_plan["views"][0]["focal_length_mm"])
+        self.assertEqual(retry_plan["views"][1]["azimuth_deg"], 335.0)
+        self.assertEqual(retry_plan["views"][2]["azimuth_deg"], 275.0)
+        self.assertEqual({item["framing_retry_policy"] for item in retry_plan["views"]}, {"widen_camera_for_uncropped_white_model_contract"})
+
+    def test_generate_codex_image2_final_render_blocks_when_white_model_framing_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_left_30"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask", "depth", "normal"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(image).rectangle((0, 32, 127, 96), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_left_30", "files": files}]})
+            create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+
+            summary = generate_codex_image2_final_render(
+                workdir=root,
+                render_manifest_path=render_manifest,
+                prompt_plan={"render_prompt": "polished final"},
+                concept_image=None,
+                output_views=1,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+            )
+
+            self.assertEqual(summary["status"], "needs_review")
+            self.assertEqual(summary["reference_policy"], "final_image2_blocked_until_white_model_camera_framing_passes")
+            self.assertEqual(summary["contract_framing_review"]["failed_views"], ["view_left_30"])
+            self.assertFalse((root / "final" / "codex_image2_final_request.json").exists())
+            self.assertTrue((root / "ai" / "agent_report.json").exists())
 
     def test_fit_final_image_to_white_model_position_restores_bbox_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

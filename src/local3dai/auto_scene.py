@@ -130,6 +130,7 @@ AUTO_SCENE_TOOL_STAGE_MAP = {
     "scene_layout_agent": "layout",
     "scene_assembler": "scene_preview",
     "camera_candidate_search": "camera",
+    "camera_framing_retry": "camera",
     "render_white_channels": "render",
     "white_model_position_contract": "agent",
     "final_image2_render": "agent",
@@ -155,6 +156,7 @@ AUTO_SCENE_TOOL_SPECS: list[dict[str, str]] = [
     {"name": "scene_layout_agent", "purpose": "compute module scale, position, rotation, and layout reasons"},
     {"name": "scene_assembler", "purpose": "assemble module GLBs into a final scene GLB and preview"},
     {"name": "camera_candidate_search", "purpose": "render low-resolution RGB previews and select the best 3D scene camera before final channels"},
+    {"name": "camera_framing_retry", "purpose": "widen and rerender the selected camera when white-model position contracts show edge-cropped framing"},
     {"name": "render_white_channels", "purpose": "render or mock scene rgb/edge/mask/depth/normal channels"},
     {"name": "white_model_position_contract", "purpose": "derive normalized screen-space bbox/center/coverage contracts from Blender white-model render channels"},
     {"name": "final_image2_render", "purpose": "request Codex built-in image2 final rendering from white-model channels with position lock"},
@@ -3991,6 +3993,59 @@ def _blender_camera_state(camera_plan: dict[str, Any], views: int) -> dict[str, 
     }
 
 
+def _camera_plan_for_framing_retry(camera_plan: dict[str, Any], framing_review: dict[str, Any], *, attempt: int = 1) -> dict[str, Any]:
+    failed_views = [str(view_id) for view_id in framing_review.get("failed_views", []) if str(view_id)]
+    if not failed_views:
+        return copy.deepcopy(camera_plan)
+    retry_attempt = max(1, int(attempt))
+    distance_factor = min(1.55, 1.18**retry_attempt)
+    ortho_factor = min(1.65, 1.22**retry_attempt)
+    focal_factor = max(0.72, 0.90**retry_attempt)
+    plan = copy.deepcopy(camera_plan)
+    raw_views = plan.get("views", [])
+    views = [copy.deepcopy(view) for view in raw_views if isinstance(view, dict)] if isinstance(raw_views, list) else []
+    if not views:
+        views = _scene_render_views(camera_plan, 3)
+    hero_azimuth = float(views[0].get("azimuth_deg", 0.0) or 0.0) if views else 0.0
+    adjusted_views: list[dict[str, Any]] = []
+    for view in views:
+        adjusted = copy.deepcopy(view)
+        camera_type = str(adjusted.get("camera_type", adjusted.get("type", "perspective"))).lower()
+        old_distance = max(0.25, float(adjusted.get("distance_scale", 1.0) or 1.0))
+        old_ortho = max(0.4, float(adjusted.get("ortho_scale", 2.7) or 2.7))
+        old_focal = max(12.0, float(adjusted.get("focal_length_mm", adjusted.get("lens", 58.0)) or 58.0))
+        adjusted["distance_scale"] = round(min(2.25, old_distance * distance_factor), 6)
+        if camera_type in {"orthographic", "ortho"}:
+            adjusted["ortho_scale"] = round(min(8.5, old_ortho * ortho_factor), 6)
+        else:
+            adjusted["focal_length_mm"] = round(max(32.0, old_focal * focal_factor), 6)
+        adjusted["framing_retry_attempt"] = retry_attempt
+        adjusted["framing_retry_policy"] = "widen_camera_for_uncropped_white_model_contract"
+        if adjusted.get("yaw_offset_deg") is not None and str(adjusted.get("view_id", "")) != "view_hero":
+            yaw_offset = float(adjusted.get("yaw_offset_deg", 0.0) or 0.0)
+            adjusted["source_camera_azimuth_deg"] = hero_azimuth
+            adjusted["azimuth_deg"] = round((hero_azimuth + yaw_offset) % 360.0, 6)
+        adjusted_views.append(adjusted)
+    plan["views"] = adjusted_views
+    plan["camera_framing_retry"] = {
+        "enabled": True,
+        "attempt": retry_attempt,
+        "failed_views": failed_views,
+        "distance_scale_factor": round(float(distance_factor), 6),
+        "ortho_scale_factor": round(float(ortho_factor), 6),
+        "focal_length_factor": round(float(focal_factor), 6),
+        "source_framing_review": framing_review,
+    }
+    return plan
+
+
+def _camera_framing_retries_from_config(config: dict[str, Any]) -> int:
+    auto_scene_cfg = config.get("auto_scene", {}) if isinstance(config.get("auto_scene"), dict) else {}
+    render_cfg = config.get("render", {}) if isinstance(config.get("render"), dict) else {}
+    raw = auto_scene_cfg.get("camera_framing_retries", render_cfg.get("camera_framing_retries", 1))
+    return max(0, min(3, int(raw or 0)))
+
+
 def _camera_candidate_states(camera_plan: dict[str, Any], views: int) -> list[dict[str, Any]]:
     base = _blender_camera_state(camera_plan, views)
     templates = [
@@ -5373,6 +5428,59 @@ def _collect_codex_image2_final_summary(
     return report
 
 
+def _collect_camera_retry_required_agent_summary(
+    *,
+    workdir: Path,
+    render_manifest_path: str | Path,
+    position_contract_path: str | Path,
+    prompt: str,
+) -> dict[str, Any]:
+    ai_dir = workdir / "ai"
+    ai_dir.mkdir(parents=True, exist_ok=True)
+    contract = _read_manifest_or_empty(Path(position_contract_path))
+    framing_review = contract.get("framing_review") if isinstance(contract.get("framing_review"), dict) else {}
+    report = {
+        "type": "agent_run_summary",
+        "status": "needs_review",
+        "output_dir": _absolute_artifact_path(ai_dir),
+        "prompt": prompt,
+        "source_model_path": "auto_scene_blender_render_channels",
+        "render_manifest": _absolute_artifact_path(render_manifest_path),
+        "reference_policy": "final_image2_blocked_until_white_model_camera_framing_passes",
+        "target_view": "view_hero",
+        "backend": "codex_builtin_image2",
+        "model_key": "codex_image2",
+        "budget": {
+            "max_generations": 0,
+            "generations_used": 0,
+            "expand_views": False,
+            "planned_views": [],
+            "pass_threshold": 1.0,
+        },
+        "trials": [],
+        "selected_trial": {},
+        "expanded_views": [],
+        "final_image": "",
+        "final_view_images": {},
+        "comparison_image": "",
+        "three_view_contact": "",
+        "multiview_contact_sheet": "",
+        "agent_report": _absolute_artifact_path(ai_dir / "agent_report.json"),
+        "decision_notes": [
+            "Final Codex image2 rendering was blocked because the Blender white-model contract still has edge-cropped camera framing.",
+            "Rerun camera selection and white-model channel rendering before requesting final AI rendering.",
+        ],
+        "structure_scores": {},
+        "multiview_scores": {"total": 0.0, "method": "blocked_by_white_model_camera_framing"},
+        "white_model_position_contract": _absolute_artifact_path(position_contract_path),
+        "contract_framing_review": framing_review,
+        "score_version": "camera_retry_required_before_final_image2",
+        "elapsed_seconds": 0.0,
+    }
+    write_manifest(ai_dir / "agent_report.json", report)
+    return report
+
+
 def generate_codex_image2_final_render(
     *,
     workdir: Path,
@@ -5391,6 +5499,15 @@ def generate_codex_image2_final_render(
                 output_image=workdir / "final" / "white_position_contract_overlay.png",
                 output_views=output_views,
             )
+    contract = _read_manifest_or_empty(Path(position_contract_path))
+    framing_review = contract.get("framing_review") if isinstance(contract.get("framing_review"), dict) else {}
+    if framing_review.get("camera_retry_required"):
+        return _collect_camera_retry_required_agent_summary(
+            workdir=workdir,
+            render_manifest_path=render_manifest_path,
+            position_contract_path=position_contract_path,
+            prompt=str(prompt_plan.get("render_prompt") or ""),
+        )
     request_path = _write_codex_image2_final_request(
         workdir=workdir,
         render_manifest_path=render_manifest_path,
@@ -6855,6 +6972,56 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     )
     white_model_position_contract_path = workdir / "reports" / "white_model_position_contract.json"
     white_position_contract_overlay_path = final_dir / "white_position_contract_overlay.png"
+    max_camera_framing_retries = _camera_framing_retries_from_config(runtime_config)
+    camera_framing_retry_attempt = 1
+    while (
+        white_model_position_contract.get("framing_review", {}).get("camera_retry_required")
+        if isinstance(white_model_position_contract.get("framing_review"), dict)
+        else False
+    ) and camera_framing_retry_attempt <= max_camera_framing_retries:
+        framing_review = white_model_position_contract.get("framing_review", {}) if isinstance(white_model_position_contract.get("framing_review"), dict) else {}
+        emit("camera", f"Retrying camera framing for uncropped white-model views, attempt {camera_framing_retry_attempt}", 0.825)
+        camera_plan = tool_executor.run(
+            "camera_framing_retry",
+            {"attempt": camera_framing_retry_attempt, "failed_views": framing_review.get("failed_views", [])},
+            lambda current_camera_plan=camera_plan, framing_review=framing_review, attempt=camera_framing_retry_attempt: _camera_plan_for_framing_retry(
+                current_camera_plan,
+                framing_review,
+                attempt=attempt,
+            ),
+        )
+        camera_plan_path = write_manifest(workdir / "cameras" / "camera_plan.json", camera_plan)
+        render_manifest_path = tool_executor.run(
+            "render_white_channels",
+            {
+                "scene_model_path": scene_outputs["scene_model_path"],
+                "views": auto_task["output_views"],
+                "render_backend": options.render_backend,
+                "framing_retry_attempt": camera_framing_retry_attempt,
+            },
+            lambda: render_scene_channels(
+                workdir,
+                scene_outputs,
+                scene_assembly_path,
+                camera_plan,
+                views=int(auto_task["output_views"]),
+                config=runtime_config,
+                dry_run=options.dry_run,
+                render_backend=options.render_backend,
+                allow_fallback=options.allow_procedural_fallback,
+            ),
+        )
+        white_model_position_contract = tool_executor.run(
+            "white_model_position_contract",
+            {"render_manifest": str(render_manifest_path), "views": auto_task["output_views"], "framing_retry_attempt": camera_framing_retry_attempt},
+            lambda: create_white_model_position_contract(
+                render_manifest=render_manifest_path,
+                output_report=workdir / "reports" / "white_model_position_contract.json",
+                output_image=final_dir / "white_position_contract_overlay.png",
+                output_views=int(auto_task.get("output_views", 3)),
+            ),
+        )
+        camera_framing_retry_attempt += 1
 
     final_render_provider = _auto_scene_final_render_provider(runtime_config, options)
     if final_render_provider == "codex_image2":
