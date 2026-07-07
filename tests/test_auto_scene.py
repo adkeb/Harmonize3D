@@ -1865,8 +1865,11 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("Binding screen-space target", item["prompt"])
             self.assertIn("paint-over canvas", item["prompt"])
             self.assertIn("same pixel positions", item["prompt"])
+            self.assertIn("Contract margin lock", item["prompt"])
+            self.assertIn("measures back to the same contract", item["prompt"])
             self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
             self.assertEqual(item["strict_edit_target_lock"], "white_model_rgb_position_lock_paint_over_canvas")
+            self.assertEqual(item["contract_margin_lock"]["policy"], "foreground_bbox_and_empty_margins_must_measure_back_to_contract")
             self.assertTrue(item["few_shot_position_lock_examples"])
             roles = {entry["role"] for entry in item["input_images"]}
             self.assertIn("white_model_rgb_position_lock", roles)
@@ -1963,8 +1966,10 @@ class AutoSceneTest(unittest.TestCase):
                 self.assertIn("Binding screen-space target", item["prompt"])
                 self.assertIn("paint-over canvas", item["prompt"])
                 self.assertIn("Previous position check metrics for this view", item["prompt"])
+                self.assertIn("Contract margin lock", item["prompt"])
                 self.assertEqual(item["edit_target_role"], "white_model_rgb_position_lock")
                 self.assertEqual(item["strict_edit_target_lock"], "white_model_rgb_position_lock_paint_over_canvas")
+                self.assertEqual(item["contract_margin_lock"]["bbox_norm"], contracts[item["view_id"]]["bbox_norm"])
                 self.assertTrue(item["few_shot_position_lock_examples"])
                 if item["view_id"] == "view_right_30":
                     self.assertEqual(item["position_lock"]["failure_reasons"], ["scale_alignment"])

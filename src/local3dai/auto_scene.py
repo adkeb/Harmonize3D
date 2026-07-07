@@ -4873,6 +4873,21 @@ def _position_contract_boundary_clause(contract: dict[str, Any]) -> str:
     )
 
 
+def _position_contract_margin_clause(contract: dict[str, Any]) -> str:
+    bbox = contract.get("bbox_norm", []) if isinstance(contract, dict) else []
+    center = contract.get("center_norm", []) if isinstance(contract, dict) else []
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return ""
+    x0, y0, x1, y1 = bbox
+    return (
+        "Contract margin lock: the first visible foreground boundary begins at "
+        f"x={x0}, y={y0}; the final visible foreground ends at x={x1}, y={y1}; "
+        f"the measured center returns to {center}. "
+        "The background and empty margins outside these four boundaries remain part of the edit target layout. "
+        "Materialization follows the existing occupied pixels so a bbox check of the generated image measures back to the same contract."
+    )
+
+
 def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
     return [
         {
@@ -4886,6 +4901,10 @@ def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
         {
             "failure_pattern": "The generated render visually improves the scene but changes the car-arm spacing, stand height, or visible gap sizes compared with the white-model channels.",
             "corrected_instruction": "Trace the white-model mask occupancy and silhouette edges first, preserve the existing car-arm spacing, stand height, visible gap sizes, and crop, then materialize the same occupied pixels as the finished scene.",
+        },
+        {
+            "failure_pattern": "The generated render keeps the main subject recognizable but moves a background screen, platform, or light bar to the frame edge, causing the final foreground bbox to expand beyond the white-model contract.",
+            "corrected_instruction": "Treat the contract margins as layout geometry: keep the first foreground boundary, final foreground boundary, empty top band, side margins, platform edge, and center point at the measured white-model positions before adding materials.",
         },
     ]
 
@@ -6137,6 +6156,7 @@ def create_final_position_retry_plan(
             "Use the white_model_rgb_position_lock input image as the edit target and binding white-model layout.",
             _strict_white_model_edit_target_clause(),
             _position_contract_boundary_clause(contract),
+            _position_contract_margin_clause(contract),
             "Position-lock correction pass: preserve the white-model contract as the exact screen-space target.",
             f"Target bbox {contract.get('bbox_norm', [])}, center {contract.get('center_norm', [])}, coverage {contract.get('coverage_ratio', '')}.",
             f"Previous position check metrics for this view: {view_metrics}.",
@@ -6154,6 +6174,11 @@ def create_final_position_retry_plan(
             "input_images": item.get("input_images", []),
             "edit_target_role": "white_model_rgb_position_lock",
             "strict_edit_target_lock": "white_model_rgb_position_lock_paint_over_canvas",
+            "contract_margin_lock": {
+                "bbox_norm": contract.get("bbox_norm", []) if isinstance(contract, dict) else [],
+                "center_norm": contract.get("center_norm", []) if isinstance(contract, dict) else [],
+                "policy": "foreground_bbox_and_empty_margins_must_measure_back_to_contract",
+            },
             "few_shot_position_lock_examples": _final_position_retry_few_shot_examples(),
             "position_lock": {
                 **(item.get("position_lock") if isinstance(item.get("position_lock"), dict) else {}),
