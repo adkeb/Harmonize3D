@@ -5131,6 +5131,128 @@ def _white_lock_view_report(white_lock_report: dict[str, Any], view_id: str) -> 
     return {}
 
 
+def _infer_view_id_from_candidate_report_path(path: Path) -> str:
+    name = path.name.lower()
+    if "left_30" in name:
+        return "view_left_30"
+    if "right_30" in name:
+        return "view_right_30"
+    if "hero" in name or "locked" in name:
+        return "view_hero"
+    return ""
+
+
+def _candidate_position_feedback_from_report(view_id: str, report: dict[str, Any], *, source: Path) -> dict[str, Any] | None:
+    if not report or str(report.get("status") or "") == "pass":
+        return None
+    reference_bbox = report.get("reference_bbox", [])
+    candidate_bbox = report.get("final_bbox", report.get("candidate_bbox", []))
+    if not isinstance(reference_bbox, list) or len(reference_bbox) != 4:
+        return None
+    if not isinstance(candidate_bbox, list) or len(candidate_bbox) != 4:
+        return None
+    ref_width = float(reference_bbox[2]) - float(reference_bbox[0])
+    ref_height = float(reference_bbox[3]) - float(reference_bbox[1])
+    cand_width = float(candidate_bbox[2]) - float(candidate_bbox[0])
+    cand_height = float(candidate_bbox[3]) - float(candidate_bbox[1])
+    return {
+        "view_id": view_id,
+        "source_report": _absolute_artifact_path(source),
+        "status": report.get("status", ""),
+        "reference_bbox": [round(float(value), 6) for value in reference_bbox],
+        "candidate_bbox": [round(float(value), 6) for value in candidate_bbox],
+        "reference_size": [round(ref_width, 6), round(ref_height, 6)],
+        "candidate_size": [round(cand_width, 6), round(cand_height, 6)],
+        "bbox_delta": [round(float(candidate_bbox[index]) - float(reference_bbox[index]), 6) for index in range(4)],
+        "metrics": report.get("metrics", {}),
+        "failure_reasons": report.get("failure_reasons", []),
+        "instruction": (
+            "Rejected candidate feedback: the measured candidate bbox must be corrected back to the reference bbox, "
+            "with the same foreground width, height, center, and empty margins."
+        ),
+    }
+
+
+def _bbox_matches_contract(reference_bbox: Any, contract_bbox: Any, *, tolerance: float = 0.0025) -> bool:
+    if not isinstance(reference_bbox, list) or not isinstance(contract_bbox, list):
+        return False
+    if len(reference_bbox) != 4 or len(contract_bbox) != 4:
+        return False
+    return all(abs(float(reference_bbox[index]) - float(contract_bbox[index])) <= tolerance for index in range(4))
+
+
+def _latest_rejected_candidate_feedback(
+    workdir: Path,
+    request_path: Path | None = None,
+    *,
+    current_contracts_by_view: Mapping[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    workdir = Path(workdir).expanduser().resolve()
+    reports_dir = workdir / "reports"
+    current_bboxes = {
+        str(view_id): dict(contract).get("bbox_norm", [])
+        for view_id, contract in dict(current_contracts_by_view or {}).items()
+        if isinstance(contract, dict)
+    }
+    candidates: list[Path] = []
+    if request_path and Path(request_path).exists():
+        request = _read_manifest_or_empty(Path(request_path))
+        audit = str(request.get("last_candidate_audit") or "")
+        if audit and Path(audit).exists():
+            candidates.append(Path(audit))
+    standard_audit = reports_dir / "codex_image2_import_position_audit.json"
+    if standard_audit.exists() and standard_audit not in candidates:
+        candidates.append(standard_audit)
+    for path in sorted(reports_dir.glob("codex_image2_candidate*position_lock*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        if path not in candidates:
+            candidates.append(path)
+
+    by_view: dict[str, dict[str, Any]] = {}
+    source_reports: list[str] = []
+    for path in candidates:
+        report = _read_manifest_or_empty(path)
+        if not report:
+            continue
+        source_reports.append(_absolute_artifact_path(path))
+        view_reports = [item for item in report.get("view_reports", []) if isinstance(item, dict)]
+        if view_reports:
+            for view_report in view_reports:
+                view_id = str(view_report.get("view_id") or view_report.get("reference_view_id") or "")
+                if not view_id or view_id in by_view:
+                    continue
+                if current_bboxes and not _bbox_matches_contract(view_report.get("reference_bbox", []), current_bboxes.get(view_id, [])):
+                    continue
+                feedback = _candidate_position_feedback_from_report(view_id, view_report, source=path)
+                if feedback:
+                    by_view[view_id] = feedback
+            continue
+        view_id = str(report.get("view_id") or report.get("reference_view_id") or "") or _infer_view_id_from_candidate_report_path(path)
+        if view_id and view_id not in by_view:
+            if current_bboxes and not _bbox_matches_contract(report.get("reference_bbox", []), current_bboxes.get(view_id, [])):
+                continue
+            feedback = _candidate_position_feedback_from_report(view_id, report, source=path)
+            if feedback:
+                by_view[view_id] = feedback
+    return {
+        "status": "has_rejected_candidates" if by_view else "none",
+        "source_reports": source_reports,
+        "views": by_view,
+    }
+
+
+def _candidate_position_feedback_prompt_clause(feedback: dict[str, Any] | None) -> str:
+    if not feedback:
+        return ""
+    return (
+        "Rejected candidate position feedback: previous candidate measured bbox "
+        f"{feedback.get('candidate_bbox', [])} while the target white-model bbox is {feedback.get('reference_bbox', [])}. "
+        f"The next candidate returns foreground width/height to {feedback.get('reference_size', [])}, "
+        f"keeps the target empty margins, and measures back to the target bbox. "
+        f"Previous candidate metrics: {feedback.get('metrics', {})}. "
+        f"Correction focus: {feedback.get('failure_reasons', [])}."
+    )
+
+
 def _render_views_by_id_from_position_contract(position_contract_path: str | Path | None) -> dict[str, dict[str, Any]]:
     if not position_contract_path or not Path(position_contract_path).exists():
         return {}
@@ -6516,6 +6638,12 @@ def create_final_position_retry_plan(
 
     contracts_by_view = _position_contract_by_view(position_contract_path)
     render_views_by_id = _render_views_by_id_from_position_contract(position_contract_path)
+    rejected_candidate_feedback = _latest_rejected_candidate_feedback(
+        Path(workdir),
+        request_path,
+        current_contracts_by_view=contracts_by_view,
+    )
+    rejected_candidate_feedback_by_view = rejected_candidate_feedback.get("views", {}) if isinstance(rejected_candidate_feedback.get("views"), dict) else {}
     existing_request_views = {str(item.get("view_id") or "") for item in original_requests}
     for view_id, contract in contracts_by_view.items():
         if not view_id or view_id in existing_request_views:
@@ -6563,6 +6691,7 @@ def create_final_position_retry_plan(
         view_report = _white_lock_view_report(white_lock_report, view_id)
         view_metrics = view_report.get("metrics", white_lock_report.get("metrics", {}))
         view_failure_reasons = view_report.get("failure_reasons", white_lock_report.get("failure_reasons", []))
+        candidate_feedback = rejected_candidate_feedback_by_view.get(view_id, {})
         input_images = [entry for entry in item.get("input_images", []) if isinstance(entry, dict)]
         measurement_input = _position_contract_measurement_input(contract=contract, final_dir=final_dir, view_id=view_id)
         if measurement_input and not any(entry.get("role") == measurement_input["role"] for entry in input_images):
@@ -6579,6 +6708,7 @@ def create_final_position_retry_plan(
             f"Target bbox {contract.get('bbox_norm', [])}, center {contract.get('center_norm', [])}, coverage {contract.get('coverage_ratio', '')}.",
             f"Previous position check metrics for this view: {view_metrics}.",
             f"Correction focus for this view: {view_failure_reasons}.",
+            _candidate_position_feedback_prompt_clause(candidate_feedback if isinstance(candidate_feedback, dict) else {}),
             "Keep the same crop, perspective, foreground/background order, object overlaps, module positions, relative scale, silhouette, and visible object count from the white-model channels.",
         ]
         retry_item = {
@@ -6599,6 +6729,7 @@ def create_final_position_retry_plan(
                 "policy": "foreground_bbox_and_empty_margins_must_measure_back_to_contract",
             },
             "few_shot_position_lock_examples": _final_position_retry_few_shot_examples(),
+            "rejected_candidate_position_feedback": candidate_feedback if isinstance(candidate_feedback, dict) else {},
             "position_lock": {
                 **(item.get("position_lock") if isinstance(item.get("position_lock"), dict) else {}),
                 "retry_policy": "correct_to_white_model_position_contract",
@@ -6630,6 +6761,7 @@ def create_final_position_retry_plan(
         "original_request": _absolute_artifact_path(request_path),
         "white_model_position_contract": _absolute_artifact_path(position_contract_path),
         "white_model_position_lock": white_lock_report,
+        "rejected_candidate_position_feedback": rejected_candidate_feedback,
         "request_count": len(retry_requests),
         "requests": retry_requests,
         "output_paths": [item["output_path"] for item in retry_requests],
@@ -6662,6 +6794,7 @@ def create_final_position_retry_plan(
         "white_model_position_contract": _absolute_artifact_path(position_contract_path),
         "white_model_position_lock_status": status,
         "contract_framing_review": framing_review,
+        "rejected_candidate_position_feedback": rejected_candidate_feedback,
         "failure_reasons": white_lock_report.get("failure_reasons", []),
         "request_count": len(retry_requests),
     }

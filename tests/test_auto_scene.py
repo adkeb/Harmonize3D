@@ -2184,6 +2184,159 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("view_left_30=/path/to/codex-image2-output-2.png", Path(retry["codex_image2_handoff"]).read_text(encoding="utf-8"))
             self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
 
+    def test_final_position_retry_plan_includes_rejected_candidate_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (32, 34, 38))
+                ImageDraw.Draw(image).rectangle((40, 46, 92, 84), fill=(230, 232, 236), outline=(90, 160, 240), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            final_request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "provider": "codex_builtin_image2",
+                    "white_model_position_contract": str(root / "reports" / "white_model_position_contract.json"),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "kind": "final_render",
+                            "output_path": str(root / "final" / "final_view_hero.png"),
+                            "prompt": "polished product render",
+                            "input_images": [{"role": "white_model_rgb_position_lock", "channel": "rgb", "path": files["rgb"]}],
+                            "position_lock_contract": contract["contracts"][0],
+                        }
+                    ],
+                },
+            )
+            write_manifest(
+                root / "reports" / "codex_image2_import_position_audit.json",
+                {
+                    "type": "codex_image2_import_position_audit",
+                    "status": "needs_review",
+                    "view_reports": [
+                        {
+                            "view_id": "view_hero",
+                            "status": "needs_review",
+                            "reference_bbox": [0.3125, 0.359375, 0.726562, 0.664062],
+                            "final_bbox": [0.125, 0.2, 0.925, 0.9],
+                            "metrics": {"bbox_iou": 0.41, "total": 0.5},
+                            "failure_reasons": ["bbox_iou", "scale_alignment"],
+                        }
+                    ],
+                },
+            )
+            white_lock_report = {
+                "type": "white_model_position_lock",
+                "status": "needs_review",
+                "metrics": {"total": 0.4},
+                "failure_reasons": ["bbox_iou"],
+            }
+
+            retry = create_final_position_retry_plan(
+                workdir=root,
+                final_request_path=final_request_path,
+                white_lock_report=white_lock_report,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+                output_report=root / "reports" / "final_position_retry_plan.json",
+            )
+
+            retry_request = read_manifest(retry["retry_request"])
+            item = retry_request["requests"][0]
+            self.assertEqual(item["rejected_candidate_position_feedback"]["candidate_bbox"], [0.125, 0.2, 0.925, 0.9])
+            self.assertIn("Rejected candidate position feedback", item["prompt"])
+            self.assertIn("[0.125, 0.2, 0.925, 0.9]", item["prompt"])
+            self.assertIn("[0.3125, 0.359375, 0.726562, 0.664062]", item["prompt"])
+            self.assertEqual(retry_request["rejected_candidate_position_feedback"]["status"], "has_rejected_candidates")
+            self.assertNotIn("negative_prompt", json.dumps(retry_request, ensure_ascii=False))
+
+    def test_final_position_retry_feedback_ignores_stale_candidate_bbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (128, 128), (32, 34, 38))
+                ImageDraw.Draw(image).rectangle((40, 46, 92, 84), fill=(230, 232, 236), outline=(90, 160, 240), width=3)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            final_request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "provider": "codex_builtin_image2",
+                    "white_model_position_contract": str(root / "reports" / "white_model_position_contract.json"),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "kind": "final_render",
+                            "output_path": str(root / "final" / "final_view_hero.png"),
+                            "prompt": "polished product render",
+                            "input_images": [{"role": "white_model_rgb_position_lock", "channel": "rgb", "path": files["rgb"]}],
+                            "position_lock_contract": contract["contracts"][0],
+                        }
+                    ],
+                },
+            )
+            write_manifest(
+                root / "reports" / "codex_image2_candidate_stale_position_lock.json",
+                {
+                    "type": "white_model_position_lock",
+                    "status": "needs_review",
+                    "view_id": "view_hero",
+                    "reference_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "final_bbox": [0.1, 0.1, 0.9, 0.9],
+                    "metrics": {"total": 0.1},
+                    "failure_reasons": ["bbox_iou"],
+                },
+            )
+            write_manifest(
+                root / "reports" / "codex_image2_candidate_current_position_lock.json",
+                {
+                    "type": "white_model_position_lock",
+                    "status": "needs_review",
+                    "view_id": "view_hero",
+                    "reference_bbox": contract["contracts"][0]["bbox_norm"],
+                    "final_bbox": [0.125, 0.2, 0.925, 0.9],
+                    "metrics": {"total": 0.5},
+                    "failure_reasons": ["bbox_iou"],
+                },
+            )
+
+            retry = create_final_position_retry_plan(
+                workdir=root,
+                final_request_path=final_request_path,
+                white_lock_report={"type": "white_model_position_lock", "status": "needs_review", "metrics": {"total": 0.4}, "failure_reasons": ["bbox_iou"]},
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+                output_report=root / "reports" / "final_position_retry_plan.json",
+            )
+
+            retry_request = read_manifest(retry["retry_request"])
+            feedback = retry_request["requests"][0]["rejected_candidate_position_feedback"]
+            self.assertEqual(feedback["candidate_bbox"], [0.125, 0.2, 0.925, 0.9])
+            self.assertNotIn("[0.0, 0.0, 1.0, 1.0]", retry_request["requests"][0]["prompt"])
+
     def test_final_position_retry_plan_synthesizes_request_when_final_image2_request_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
