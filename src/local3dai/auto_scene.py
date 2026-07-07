@@ -1926,6 +1926,85 @@ def _codex_image2_request_items(request: dict[str, Any]) -> list[dict[str, Any]]
     return [request]
 
 
+def _codex_image2_request_requires_position_validation(request: dict[str, Any]) -> bool:
+    request_type = str(request.get("type") or "")
+    request_kind = str(request.get("kind") or "")
+    if "final_render" not in request_type and "final_render" not in request_kind and "position_retry" not in request_type and "position_retry" not in request_kind:
+        return False
+    if request.get("white_model_position_contract") or str(request.get("reference_policy") or "").startswith("white_model_position"):
+        return True
+    items = _codex_image2_request_items(request)
+    return any(isinstance(item.get("position_lock_contract"), dict) for item in items)
+
+
+def _render_manifest_for_codex_image2_request(request: dict[str, Any], request_path: Path) -> Path | None:
+    raw_manifest = str(request.get("render_manifest") or "")
+    if raw_manifest and Path(raw_manifest).exists():
+        return Path(raw_manifest).expanduser().resolve()
+    contract_path = Path(str(request.get("white_model_position_contract") or "")).expanduser()
+    if contract_path.exists():
+        contract = _read_manifest_or_empty(contract_path)
+        raw_manifest = str(contract.get("render_manifest") or "")
+        if raw_manifest and Path(raw_manifest).exists():
+            return Path(raw_manifest).expanduser().resolve()
+    original_request = Path(str(request.get("original_request") or "")).expanduser()
+    if original_request.exists():
+        original = _read_manifest_or_empty(original_request)
+        raw_manifest = str(original.get("render_manifest") or "")
+        if raw_manifest and Path(raw_manifest).exists():
+            return Path(raw_manifest).expanduser().resolve()
+    fallback = request_path.parents[1] / "renders" / "render_manifest.json" if len(request_path.parents) > 1 else request_path.parent / "renders" / "render_manifest.json"
+    return fallback.expanduser().resolve() if fallback.exists() else None
+
+
+def _stage_codex_image2_position_candidates(
+    request_path: Path,
+    items: list[dict[str, Any]],
+    sources_by_view: Mapping[str, Path],
+) -> dict[str, str]:
+    candidate_dir = request_path.parent / "codex_image2_import_candidates"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    staged: dict[str, str] = {}
+    for index, item in enumerate(items, start=1):
+        view_id = str(item.get("view_id") or f"view_{index}")
+        source = sources_by_view.get(view_id)
+        if source is None:
+            continue
+        staged_path = candidate_dir / f"{_safe_view_file_stem(view_id)}.png"
+        staged_path.write_bytes(Path(source).read_bytes())
+        staged[view_id] = _absolute_artifact_path(staged_path)
+    return staged
+
+
+def _validate_codex_image2_position_import(
+    *,
+    request_path: Path,
+    request: dict[str, Any],
+    items: list[dict[str, Any]],
+    sources_by_view: Mapping[str, Path],
+) -> dict[str, Any] | None:
+    if not _codex_image2_request_requires_position_validation(request):
+        return None
+    render_manifest = _render_manifest_for_codex_image2_request(request, request_path)
+    if render_manifest is None:
+        return None
+    staged_view_images = _stage_codex_image2_position_candidates(request_path, items, sources_by_view)
+    audit_path = request_path.parent.parent / "reports" / "codex_image2_import_position_audit.json"
+    overlay_path = request_path.parent / "codex_image2_import_position_audit_overlay.png"
+    report = create_white_model_multiview_position_lock_report(
+        final_view_images=staged_view_images,
+        render_manifest=render_manifest,
+        output_report=audit_path,
+        output_image=overlay_path,
+    )
+    report["type"] = "codex_image2_import_position_audit"
+    report["request_path"] = _absolute_artifact_path(request_path)
+    report["candidate_view_images"] = staged_view_images
+    report["policy"] = "reject_import_unless_original_codex_image2_candidates_pass_white_model_position_lock"
+    write_manifest(audit_path, report)
+    return report
+
+
 def import_codex_image2_result(
     request_path: Path,
     *,
@@ -1948,6 +2027,8 @@ def import_codex_image2_result(
 
     imported_at = _image2_import_timestamp()
     imports: list[dict[str, Any]] = []
+    sources_by_view: dict[str, Path] = {}
+    resolved_sources: dict[int, Path] = {}
     for item in items:
         output_path = str(item.get("output_path") or item.get("output") or "").strip()
         if not output_path:
@@ -1958,6 +2039,41 @@ def import_codex_image2_result(
             image_mappings=mappings,
             allow_single_image=allow_single_image,
         )
+        view_id = str(item.get("view_id") or "")
+        if view_id:
+            sources_by_view[view_id] = Path(source).expanduser().resolve()
+        resolved_sources[id(item)] = Path(source).expanduser().resolve()
+
+    position_audit = _validate_codex_image2_position_import(
+        request_path=request_path,
+        request=request,
+        items=items,
+        sources_by_view=sources_by_view,
+    )
+    if position_audit and position_audit.get("status") != "pass":
+        request["status"] = "candidate_rejected_by_position_lock"
+        request["last_candidate_audit"] = _absolute_artifact_path(request_path.parent.parent / "reports" / "codex_image2_import_position_audit.json")
+        request["last_candidate_status"] = position_audit.get("status", "")
+        request["last_candidate_failed_views"] = position_audit.get("failed_views", [])
+        write_manifest(request_path, request)
+        summary = {
+            "type": "codex_image2_import",
+            "status": "rejected_by_position_lock",
+            "request_path": str(request_path),
+            "request_kind": request.get("kind") or request.get("type") or "",
+            "imported_at": imported_at,
+            "import_count": 0,
+            "candidate_audit": request["last_candidate_audit"],
+            "failed_views": position_audit.get("failed_views", []),
+            "metrics": position_audit.get("metrics", {}),
+            "imports": [],
+        }
+        write_manifest(request_path.with_name("codex_image2_import.json"), summary)
+        return summary
+
+    for item in items:
+        output_path = str(item.get("output_path") or item.get("output") or "").strip()
+        source = resolved_sources[id(item)]
         copied = _copy_codex_image2_result(source, output_path)
         item["status"] = "fulfilled_by_codex_image2"
         item["imported_at"] = imported_at

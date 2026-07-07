@@ -115,6 +115,33 @@ class AutoSceneCliTest(unittest.TestCase):
             self.assertTrue(options.dry_run)
             self.assertFalse(options.use_llm)
 
+    def test_auto_scene_position_retry_stops_when_import_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_retry_workdir(root)
+            write_manifest(root / "auto_task.json", {"user_request": "生成一个未来汽车发布会展台", "output_views": 3})
+
+            with patch(
+                "local3dai.cli.import_latest_codex_image2_results",
+                return_value={"status": "rejected_by_position_lock", "import_count": 0, "failed_views": ["view_hero"]},
+            ) as import_latest, patch("local3dai.cli.run_auto_scene") as run_scene:
+                code, result = self._run_cli(
+                    [
+                        "auto-scene-run-position-retry",
+                        "--workdir",
+                        str(root),
+                        "--backend",
+                        "mock",
+                        "--dry-run",
+                        "--no-llm",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(result["status"], "rejected_by_position_lock")
+            import_latest.assert_called_once()
+            run_scene.assert_not_called()
+
     def test_auto_scene_fit_position_lock_keeps_summary_final_images_on_originals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

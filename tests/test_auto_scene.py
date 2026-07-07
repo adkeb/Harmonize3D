@@ -1368,6 +1368,55 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["requests"][0]["fulfilled_output_path"], str(output.resolve()))
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
 
+    def test_position_retry_import_rejects_candidate_that_drifts_from_white_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            rect = (34, 44, 94, 84)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                image = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(image).rectangle(rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                path = view_dir / f"{channel}.png"
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            final_source = root / "generated" / "view_hero.png"
+            final_source.parent.mkdir(parents=True)
+            drifted = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(drifted).rectangle((4, 12, 124, 116), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            drifted.save(final_source)
+            output = root / "final" / "final_view_hero.png"
+            request_path = write_manifest(
+                root / "final" / "codex_image2_position_retry_request.json",
+                {
+                    "type": "codex_image2_position_retry_request",
+                    "kind": "final_render_position_retry_batch",
+                    "status": "awaiting_codex_image2",
+                    "reference_policy": "white_model_position_locked_render_channels_only",
+                    "render_manifest": str(render_manifest),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "kind": "final_render_position_retry",
+                            "output_path": str(output),
+                            "position_lock_contract": {"status": "pass", "bbox_norm": [0.25, 0.34, 0.75, 0.66], "center_norm": [0.5, 0.5]},
+                        }
+                    ],
+                },
+            )
+
+            summary = import_codex_image2_result(request_path, image_mappings={"view_hero": final_source})
+
+            self.assertEqual(summary["status"], "rejected_by_position_lock")
+            self.assertEqual(summary["import_count"], 0)
+            self.assertFalse(output.exists())
+            self.assertTrue(Path(summary["candidate_audit"]).exists())
+            request = read_manifest(request_path)
+            self.assertEqual(request["status"], "candidate_rejected_by_position_lock")
+            self.assertEqual(request["last_candidate_failed_views"], ["view_hero"])
+
     def test_module_references_can_use_dashscope_imagegen_file_provider(self) -> None:
         import threading
         import time

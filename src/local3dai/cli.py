@@ -330,7 +330,7 @@ def cmd_auto_scene_import_image2(args: argparse.Namespace) -> int:
         image_mappings=mappings,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    return 0 if summary.get("status") == "complete" else 2
 
 
 def cmd_auto_scene_import_latest_image2(args: argparse.Namespace) -> int:
@@ -342,7 +342,7 @@ def cmd_auto_scene_import_latest_image2(args: argparse.Namespace) -> int:
         newest_first=bool(args.newest_first),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    return 0 if summary.get("status") == "complete" else 2
 
 
 def _auto_scene_options_from_workdir(workdir: Path, args: argparse.Namespace) -> AutoSceneOptions:
@@ -606,6 +606,10 @@ def cmd_auto_scene_run_position_retry(args: argparse.Namespace) -> int:
             after_marker=Path(args.after_marker) if args.after_marker else None,
             newest_first=bool(args.newest_first),
         )
+        if result["import"].get("status") != "complete":
+            result["status"] = result["import"].get("status", "import_failed")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2
 
     if args.import_only:
         result["status"] = "imported"
