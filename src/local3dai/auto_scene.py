@@ -4898,6 +4898,26 @@ def _position_contract_margin_clause(contract: dict[str, Any]) -> str:
     )
 
 
+def _position_contract_measurement_input(
+    *,
+    contract: dict[str, Any],
+    final_dir: Path,
+    view_id: str,
+) -> dict[str, str] | None:
+    if not contract or not contract.get("source_rgb"):
+        return None
+    output_dir = final_dir / "position_contract_references"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{_safe_view_file_stem(view_id)}.png"
+    overlay = _write_position_contract_overlay([contract], output_path)
+    return {
+        "role": "position_contract_measurement_reference",
+        "path": _absolute_artifact_path(overlay),
+        "channel": "position_contract_overlay",
+        "source": "white_model_position_contract",
+    }
+
+
 def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
     return [
         {
@@ -6162,10 +6182,15 @@ def create_final_position_retry_plan(
         view_report = _white_lock_view_report(white_lock_report, view_id)
         view_metrics = view_report.get("metrics", white_lock_report.get("metrics", {}))
         view_failure_reasons = view_report.get("failure_reasons", white_lock_report.get("failure_reasons", []))
+        input_images = [entry for entry in item.get("input_images", []) if isinstance(entry, dict)]
+        measurement_input = _position_contract_measurement_input(contract=contract, final_dir=final_dir, view_id=view_id)
+        if measurement_input and not any(entry.get("role") == measurement_input["role"] for entry in input_images):
+            input_images.append(measurement_input)
         prompt_parts = [
             _strip_position_contract_prompt_clauses(str(item.get("prompt") or "")),
             _position_contract_prompt_clause(contract),
             "Use the white_model_rgb_position_lock input image as the edit target and binding white-model layout.",
+            "Use the position_contract_measurement_reference input as the bbox and empty-margin measurement guide for this retry.",
             _strict_white_model_edit_target_clause(),
             _position_contract_boundary_clause(contract),
             _position_contract_margin_clause(contract),
@@ -6183,8 +6208,9 @@ def create_final_position_retry_plan(
             "attempt": 1,
             "output_path": _absolute_artifact_path(item.get("output_path") or final_dir / _final_output_filename(view_id)),
             "prompt": "\n\n".join(part for part in prompt_parts if part),
-            "input_images": item.get("input_images", []),
+            "input_images": input_images,
             "edit_target_role": "white_model_rgb_position_lock",
+            "measurement_reference_role": "position_contract_measurement_reference",
             "strict_edit_target_lock": "white_model_rgb_position_lock_paint_over_canvas",
             "contract_margin_lock": {
                 "bbox_norm": contract.get("bbox_norm", []) if isinstance(contract, dict) else [],
