@@ -355,22 +355,28 @@ README 中记录的 2026-06-18 Auto Scene 运行验证了完整模块化链路�
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-该运行结果状态为 `needs_review`，不是 `pass`。关键指标：
+该运行结果在模块化 3D 链路和最终图白模位置约束上已经取得阶段性通过；概念语义对比仍保留为后续优化项。关键指标：
 
 - 生成 5 个 Hunyuan3D 2.1 high-profile 模块 GLB。
 - 无 procedural fallback。
 - module presence score: `0.855333`
 - multiview score: `0.789947`
 - minimum structure review score: `0.551932`
-- concept/final comparison 仍失败 `white_hero_presence`
-- final image central white subject ratio 约 `0.000431`
+- `white_model_position_contract.status`: `pass`
+- `white_model_position_lock.status`: `pass`
+- position-lock pass rate: `1.0`
+- position-lock average total: `0.819275`
+- per-view position totals: `view_hero=0.855849`, `view_left_30=0.800278`, `view_right_30=0.801699`
+- `final_position_retry_plan.status`: `not_needed`
+- concept/final comparison 仍可用于标记概念语义差异，并不再代表白模位置失败
 
 主要结论：
 
 - 模块化 3D 场景链路已经能跑通。
 - 模块级 Hunyuan3D 生成已经不再停留在 mock。
-- 最终图仍可能不严格符合白模位置和概念图主车视角。
-- 相机搜索、屏幕/面板类模块质量控制、最终图白模位置锁仍是重点改进方向。
+- 当前最终图已经通过白模位置锁，可作为当前 Agent 流程的合格成品图。
+- 成功导入 image2 成品后，流程会自动刷新 `contact_sheet.png`、`white_vs_final.png` 和 `concept_vs_final.png`，避免论文资产继续引用旧失败图。
+- 后续重点转向概念图到模块参考图、模块 3D 质量、屏幕/面板类模块质量控制和概念语义一致性。
 
 示例图：
 
@@ -520,4 +526,3 @@ Hunyuan3D 对车辆类效果相对可用，但对薄屏幕、灯带、平台等�
 Harmonize3D 当前已经形成一条清晰的工程路线：用 `qwen3.7-plus` 负责需求理解和多模态审查，用 Codex image2 负责概念图与模块参考图生成，用 Hunyuan3D 负责模块级 3D 资产生成，用 Blender/程序化渲染负责白模结构通道，用最终 AI/Codex image2 负责成品图表现，并用审计器验证流程是否真实符合目标。
 
 项目的价值不在于单张图是否足够好看，而在于每一步都能被记录、复盘和修正。最新实现已经把“概念规划 -> 模块参考 -> 模块 3D -> 3D 场景组装 -> 白模通道 -> 最终渲染”的工程框架搭起来，并进一步把 Codex image2 的外部 handoff/import 变成了可审计的数据契约。当前主要未完成点是 Codex 内置 image2 的产物路径自动回填，以及最终图对白模位置的强约束。下一阶段应围绕这两个问题继续收敛。
-

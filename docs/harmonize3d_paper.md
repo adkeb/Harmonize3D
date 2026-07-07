@@ -14,7 +14,7 @@
 
 生成式图像模型能够快速产生高质量视觉概念，但在面向产品渲染、汽车展示、游戏资产预览和复杂场景设计等 3D 内容生产任务时，仍然存在结构漂移、视角不一致、过程不可审计和人工调参成本高等问题。本文提出并总结 Harmonize3D 的阶段性系统：一个本地运行的 3D 结构约束 AI 渲染 Agent。系统不把图像模型视为一次性自由生成器，而是先构建或导入真实 3D 白模，再通过相机状态、Blender 结构通道和 render manifest 建立可追踪的数据契约，最后由 AI 图像模型在模型派生通道的约束下完成视觉渲染。
 
-本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 6 月 18 日运行已经不再停留在 mock/procedural 资产；但当前 Codex image2 成图仍没有严格服从 Blender 白模通道，尤其在侧视角中出现相对位置和主体覆盖偏移。因此，系统现在把 `white_model_position_fit` 降级为诊断预览，只允许原始 image2 成图通过严格 `white_model_position_lock` 后进入成品；当前结果进入 `awaiting_codex_image2_retry`，等待按白模通道重新生成。
+本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 6 月 18 日运行已经不再停留在 mock/procedural 资产；经过失败候选反馈、相机 framing 复核和 Codex image2 位置重试后，当前三视角最终图已经按 Blender 白模通道完成渲染，并通过严格 `white_model_position_lock`。系统将 `white_model_position_fit` 保持为诊断预览，只允许原始 image2 成图通过位置锁后进入成品。
 
 需要明确的是，Harmonize3D 当前并非工业级渲染器，也不是已完成大规模训练或充分评测的全场景生成模型。本文的贡献在于提出一种模型外部的、轻量可审计的 3D-grounded rendering 流程：以真实 3D 模型和结构通道作为最终渲染的权威约束，以 Agent 负责任务规划、工具执行、候选筛选与失败复核，从而把“漂亮但不可控”的图像生成推进为“结构可追踪、视角可复现、结果可检查”的 3D AI 渲染工作流。
 
@@ -193,7 +193,7 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 *图 12  最新 Auto Scene hero view 的 RGB、Edge、Mask、Depth、Normal 通道。*
 
-图 13 展示了重新同步后的三视角 Agent 输出，图 14 展示了白模参考与原始最终渲染对照。本次缺陷排查发现，论文中原先展示的三视角图并不是当前工作目录中的最新 Agent 包，而是旧的失败视角和校验中间图，导致页面中出现大面积灰块、遮挡和主体变暗。进一步检查后也确认，不能通过裁切、重排或 bbox 后处理把图像包装成合格成品：最终图必须由 image2 在 Blender 白模通道约束下生成，并通过原始图的白模位置锁。为避免论文资产脱离流程，项目新增 `scripts/sync_paper_auto_scene_assets.py`，只从指定 Auto Scene workdir 同步 Agent 原始产物、白模对照图和 position-lock 证据到 `docs/paper_assets` 与 `reports/paper_assets`。
+图 13 展示了重新同步后的三视角 Agent 输出，图 14 展示了白模参考与原始最终渲染对照。本次缺陷排查发现，论文中原先展示的三视角图并不是当前工作目录中的最新 Agent 包，而是旧的失败视角和校验中间图，导致页面中出现大面积灰块、遮挡和主体变暗。进一步检查后也确认，不能通过裁切、重排或 bbox 后处理把图像包装成合格成品：最终图必须由 image2 在 Blender 白模通道约束下生成，并通过原始图的白模位置锁。为避免论文资产脱离流程，项目新增并继续使用 `scripts/sync_paper_auto_scene_assets.py`，只从指定 Auto Scene workdir 同步 Agent 原始产物、白模对照图和 position-lock 证据到 `docs/paper_assets` 与 `reports/paper_assets`；同时，成功导入 image2 成品后会自动刷新 contact sheet、白模对照图和概念对比图，避免论文继续引用旧失败图。
 
 ![final_contact_sheet.png](paper_assets/final_contact_sheet.png)
 
@@ -203,9 +203,9 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 *图 14  最新白模参考与原始最终 AI 渲染对照。*
 
-图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -> 模块参考 -> 模块 3D -> 3D 场景组装 -> Blender 白模通道 -> 最终 AI 渲染”，同时也暴露出论文资产管理本身需要纳入流程：最终图不能只依赖人工复制的旧文件，而应从当前 workdir、render manifest 和位置锁定报告中可复现生成。
+图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -> 模块参考 -> 模块 3D -> 3D 场景组装 -> Blender 白模通道 -> 最终 AI 渲染”，并且最终图已经由当前 workdir、render manifest 和位置锁定报告可复现地生成，而不是依赖人工复制的旧文件。
 
-在当前三视角工作目录中，原始最终图的 `white_model_position_lock` 为 `needs_review`，pass rate 为 0.0；`view_hero` 失败于 bbox IoU、center alignment 和 total score，`view_left_30` 失败于 bbox IoU、center alignment 和 total score，`view_right_30` 失败于 bbox IoU、center alignment、scale alignment 和 total score。这说明当前成品图候选仍没有按 Blender 白模位置完成渲染，不能进入最终成品。`final_position_retry_plan` 因此返回 `awaiting_codex_image2_retry`，并为 `view_hero`、`view_left_30`、`view_right_30` 三个视角生成新的 Codex image2 请求；请求把 `white_model_rgb_position_lock` 作为严格 paint-over 编辑画布，携带每个视角自己的失败指标，并继续禁止 `negative_prompt` 字段。`white_model_position_fit` 仍可生成诊断预览，但它不再覆盖 `final_view_*.png`，也不再参与 complete 判定。
+在当前三视角工作目录中，原始 Codex image2 成品图的 `white_model_position_lock` 已经通过，pass rate 为 `1.0`，平均 total 为 `0.819275`。其中 `view_hero` 的 total 为 `0.855849`，`view_left_30` 为 `0.800278`，`view_right_30` 为 `0.801699`；三视角失败原因均为空。`final_position_retry_plan` 因此返回 `not_needed`，原因是 `white_model_position_lock_passed`。这说明最终图已经按 Blender 白模位置完成渲染，可以作为当前 Agent 流程的合格成品进入论文与 README 展示；同时，`concept_final_comparison` 仍可继续标记概念语义层面的差异，用于后续改善概念图到模块拆解、模块 3D 和场景搭建环节。
 
 ![concept_vs_final.png](paper_assets/concept_vs_final.png)
 
@@ -215,7 +215,7 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 *图 16  最新结果：3D 白模 hero view。*
 
-图 16 和图 17 进一步显示了当前问题来源：白模已经给出明确的展台结构，但 image2 候选仍倾向于重组为更干净的营销构图，导致机械臂、车辆、平台和屏幕的相对关系不能完全服从白模。后续改进重点是让最终成图、严格 position-lock、论文资产同步和 DOCX/PDF 构建全部由同一份 workdir 报告驱动；未通过白模锁的图只能作为候选或复盘材料，不能作为合格成品图。
+图 16 和图 17 进一步显示了当前修复后的结果：白模给出展台结构，image2 成品图在材质化和光影细节上提升了视觉质量，同时通过位置锁保持机械臂、车辆、平台和屏幕的相对关系。后续改进重点从“成品图是否按白模渲染”转向更前面的中间环节：概念图与模块参考图如何约束 3D AI 生成质量、模块白模如何减少低质量资产、场景装配如何让概念语义和最终多视图更加一致。
 
 ![final_view_hero.png](paper_assets/final_view_hero.png)
 

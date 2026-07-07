@@ -2005,6 +2005,82 @@ def _validate_codex_image2_position_import(
     return report
 
 
+def _refresh_codex_image2_final_artifacts_after_import(
+    *,
+    request_path: Path,
+    request: dict[str, Any],
+    imports: list[dict[str, Any]],
+) -> dict[str, str]:
+    if not _codex_image2_request_requires_position_validation(request):
+        return {}
+    final_view_images = {
+        str(item.get("view_id") or ""): str(item.get("output_path") or "")
+        for item in imports
+        if str(item.get("view_id") or "") and str(item.get("output_path") or "") and Path(str(item.get("output_path") or "")).exists()
+    }
+    if not final_view_images:
+        return {}
+
+    workdir = request_path.parent.parent
+    final_dir = request_path.parent
+    reports_dir = workdir / "reports"
+    render_manifest = _render_manifest_for_codex_image2_request(request, request_path)
+    refreshed: dict[str, str] = {}
+
+    contact_sheet = _write_labeled_contact_sheet(
+        [(view_id, path) for view_id, path in final_view_images.items()],
+        final_dir / "contact_sheet.png",
+        panel_size=(512, 512),
+    )
+    refreshed["contact_sheet"] = _absolute_artifact_path(contact_sheet)
+
+    if render_manifest is not None:
+        hero_view = _render_hero_view(render_manifest) or {}
+        hero_rgb = str(dict(hero_view.get("files", {})).get("rgb") or "")
+        hero_image = final_view_images.get("view_hero") or next(iter(final_view_images.values()), "")
+        comparison_image = _write_labeled_contact_sheet(
+            [("White model reference", hero_rgb), ("Final render", hero_image)],
+            final_dir / "white_vs_final.png",
+            panel_size=(768, 768),
+        )
+        refreshed["comparison_image"] = _absolute_artifact_path(comparison_image)
+        concept_image = workdir / "concept" / "global_concept.png"
+        if concept_image.exists() and hero_image:
+            concept_report = create_concept_final_comparison(
+                concept_image=concept_image,
+                final_image=hero_image,
+                render_manifest=render_manifest,
+                output_image=final_dir / "concept_vs_final.png",
+                output_report=reports_dir / "concept_final_comparison.json",
+            )
+            refreshed["concept_vs_final"] = _absolute_artifact_path(final_dir / "concept_vs_final.png")
+            refreshed["concept_final_comparison"] = _absolute_artifact_path(reports_dir / "concept_final_comparison.json")
+            refreshed["concept_final_comparison_status"] = str(concept_report.get("status", ""))
+
+    summary_path = workdir / "auto_scene_summary.json"
+    if summary_path.exists():
+        summary = _read_manifest_or_empty(summary_path)
+        summary["final_view_images"] = {view_id: _absolute_artifact_path(path) for view_id, path in final_view_images.items()}
+        if final_view_images.get("view_hero"):
+            summary["final_image"] = _absolute_artifact_path(final_view_images["view_hero"])
+        for key in ("contact_sheet", "comparison_image", "concept_vs_final", "concept_final_comparison"):
+            if refreshed.get(key):
+                summary[key] = refreshed[key]
+        artifacts = summary.setdefault("artifacts", {})
+        if isinstance(artifacts, dict):
+            for key in ("final_image", "contact_sheet", "comparison_image", "concept_vs_final", "concept_final_comparison"):
+                if summary.get(key):
+                    artifacts[key] = summary[key]
+        summary["artifact_urls"] = {
+            key: f"/api/file?path={value}"
+            for key, value in dict(summary.get("artifacts", {})).items()
+            if Path(str(value)).suffix
+        }
+        write_manifest(summary_path, summary)
+
+    return refreshed
+
+
 def import_codex_image2_result(
     request_path: Path,
     *,
@@ -2093,6 +2169,11 @@ def import_codex_image2_result(
     request["import_count"] = len(imports)
     import_manifest_path = request_path.with_name("codex_image2_import.json")
     request["import_manifest"] = str(import_manifest_path)
+    refreshed_artifacts = _refresh_codex_image2_final_artifacts_after_import(
+        request_path=request_path,
+        request=request,
+        imports=imports,
+    )
     write_manifest(request_path, request)
     summary = {
         "type": "codex_image2_import",
@@ -2102,6 +2183,7 @@ def import_codex_image2_result(
         "imported_at": imported_at,
         "import_count": len(imports),
         "imports": imports,
+        "refreshed_artifacts": refreshed_artifacts,
     }
     write_manifest(import_manifest_path, summary)
     return summary

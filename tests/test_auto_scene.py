@@ -1368,6 +1368,74 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["requests"][0]["fulfilled_output_path"], str(output.resolve()))
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
 
+    def test_position_retry_import_refreshes_final_derived_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            rect = (34, 44, 94, 84)
+            files = {}
+            for channel in ("rgb", "edge", "mask"):
+                image = Image.new("RGB", (128, 128), (34, 36, 40))
+                ImageDraw.Draw(image).rectangle(rect, fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+                path = view_dir / f"{channel}.png"
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            concept = root / "concept" / "global_concept.png"
+            concept.parent.mkdir(parents=True)
+            Image.new("RGB", (128, 128), (20, 90, 180)).save(concept)
+            write_manifest(
+                root / "auto_scene_summary.json",
+                {
+                    "type": "auto_scene_summary",
+                    "status": "needs_review",
+                    "workdir": str(root),
+                    "render_manifest": str(render_manifest),
+                    "final_image": str(root / "final" / "old_final.png"),
+                    "final_view_images": {},
+                    "artifacts": {},
+                },
+            )
+            final_source = root / "generated" / "view_hero.png"
+            final_source.parent.mkdir(parents=True)
+            candidate = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(candidate).rectangle(rect, fill=(240, 244, 248), outline=(80, 150, 230), width=3)
+            candidate.save(final_source)
+            output = root / "final" / "final_view_hero.png"
+            request_path = write_manifest(
+                root / "final" / "codex_image2_position_retry_request.json",
+                {
+                    "type": "codex_image2_position_retry_request",
+                    "kind": "final_render_position_retry_batch",
+                    "status": "awaiting_codex_image2",
+                    "reference_policy": "white_model_position_locked_render_channels_only",
+                    "render_manifest": str(render_manifest),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "kind": "final_render_position_retry",
+                            "output_path": str(output),
+                            "position_lock_contract": {"status": "pass", "bbox_norm": [0.25, 0.34, 0.75, 0.66], "center_norm": [0.5, 0.5]},
+                        }
+                    ],
+                },
+            )
+
+            summary = import_codex_image2_result(request_path, image_mappings={"view_hero": final_source})
+
+            self.assertEqual(summary["status"], "complete")
+            refreshed = summary["refreshed_artifacts"]
+            self.assertTrue(Path(refreshed["contact_sheet"]).exists())
+            self.assertTrue(Path(refreshed["comparison_image"]).exists())
+            self.assertTrue(Path(refreshed["concept_vs_final"]).exists())
+            self.assertTrue(Path(refreshed["concept_final_comparison"]).exists())
+            updated_summary = read_manifest(root / "auto_scene_summary.json")
+            self.assertEqual(updated_summary["final_image"], str(output.resolve()))
+            self.assertEqual(updated_summary["final_view_images"]["view_hero"], str(output.resolve()))
+            self.assertEqual(updated_summary["contact_sheet"], str((root / "final" / "contact_sheet.png").resolve()))
+            self.assertEqual(updated_summary["comparison_image"], str((root / "final" / "white_vs_final.png").resolve()))
+
     def test_position_retry_import_rejects_candidate_that_drifts_from_white_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
