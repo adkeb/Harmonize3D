@@ -1922,6 +1922,18 @@ class AutoSceneTest(unittest.TestCase):
             contracts = {item["view_id"]: item for item in contract["contracts"]}
             for item in request_items:
                 item["position_lock_contract"] = contracts[item["view_id"]]
+            request_items[0]["position_lock_contract"] = {
+                **request_items[0]["position_lock_contract"],
+                "bbox_norm": [0.0, 0.0, 1.0, 1.0],
+                "center_norm": [0.5, 0.5],
+                "coverage_ratio": 1.0,
+            }
+            request_items[0]["prompt"] = (
+                f"{request_items[0]['prompt']}\n\n"
+                "White-model position contract: preserve normalized foreground bbox [0.0, 0.0, 1.0, 1.0], "
+                "center [0.5, 0.5], and coverage 1.0. "
+                "Keep every visible module anchored to this same screen-space structure."
+            )
             final_request_path = write_manifest(
                 root / "final" / "codex_image2_final_request.json",
                 {
@@ -1971,6 +1983,11 @@ class AutoSceneTest(unittest.TestCase):
                 self.assertEqual(item["strict_edit_target_lock"], "white_model_rgb_position_lock_paint_over_canvas")
                 self.assertEqual(item["contract_margin_lock"]["bbox_norm"], contracts[item["view_id"]]["bbox_norm"])
                 self.assertTrue(item["few_shot_position_lock_examples"])
+                if item["view_id"] == "view_hero":
+                    self.assertEqual(item["position_lock_contract"]["bbox_norm"], contracts["view_hero"]["bbox_norm"])
+                    self.assertNotEqual(item["contract_margin_lock"]["bbox_norm"], [0.0, 0.0, 1.0, 1.0])
+                    self.assertIn(str(contracts["view_hero"]["bbox_norm"]), item["prompt"])
+                    self.assertNotIn("[0.0, 0.0, 1.0, 1.0]", item["prompt"])
                 if item["view_id"] == "view_right_30":
                     self.assertEqual(item["position_lock"]["failure_reasons"], ["scale_alignment"])
                     self.assertIn("'scale_alignment': 0.57", item["prompt"])

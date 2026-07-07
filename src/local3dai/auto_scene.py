@@ -4857,6 +4857,16 @@ def _position_contract_prompt_clause(contract: dict[str, Any]) -> str:
     )
 
 
+def _strip_position_contract_prompt_clauses(prompt: str) -> str:
+    return re.sub(
+        r"\s*White-model position contract: preserve normalized foreground bbox \[[^\]]*\], "
+        r"center \[[^\]]*\], and coverage .*?\. "
+        r"Keep every visible module anchored to this same screen-space structure\.\s*",
+        "\n\n",
+        str(prompt or ""),
+    ).strip()
+
+
 def _position_contract_boundary_clause(contract: dict[str, Any]) -> str:
     bbox = contract.get("bbox_norm", []) if isinstance(contract, dict) else []
     center = contract.get("center_norm", []) if isinstance(contract, dict) else []
@@ -6147,12 +6157,14 @@ def create_final_position_retry_plan(
     retry_requests: list[dict[str, Any]] = []
     for index, item in enumerate(original_requests, start=1):
         view_id = str(item.get("view_id") or f"view_{index}")
-        contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else contracts_by_view.get(view_id, {})
+        item_contract = item.get("position_lock_contract") if isinstance(item.get("position_lock_contract"), dict) else {}
+        contract = contracts_by_view.get(view_id) or item_contract
         view_report = _white_lock_view_report(white_lock_report, view_id)
         view_metrics = view_report.get("metrics", white_lock_report.get("metrics", {}))
         view_failure_reasons = view_report.get("failure_reasons", white_lock_report.get("failure_reasons", []))
         prompt_parts = [
-            str(item.get("prompt") or ""),
+            _strip_position_contract_prompt_clauses(str(item.get("prompt") or "")),
+            _position_contract_prompt_clause(contract),
             "Use the white_model_rgb_position_lock input image as the edit target and binding white-model layout.",
             _strict_white_model_edit_target_clause(),
             _position_contract_boundary_clause(contract),
