@@ -11,6 +11,7 @@ from .agent import AgentRunOptions, run_agent_render, summarize_agent_report
 from .auto_agent import AutoRunOptions, qwen_runtime_status, run_auto_agent
 from .auto_scene import (
     AutoSceneOptions,
+    AutoSceneSelfIterationOptions,
     audit_auto_scene_image2_flow,
     create_final_position_retry_plan,
     create_white_model_multiview_position_lock_report,
@@ -19,6 +20,7 @@ from .auto_scene import (
     import_codex_image2_result,
     import_latest_codex_image2_results,
     run_auto_scene,
+    run_auto_scene_self_iteration,
 )
 from .ai.backends import build_backend
 from .config import load_config, resolve_path, write_config
@@ -303,6 +305,59 @@ def cmd_auto_scene(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_auto_scene_self_iterate(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    workdir = Path(args.output or Path(config["paths"]["outputs_dir"]) / "auto_scene" / f"scene-{timestamp}")
+    result = run_auto_scene_self_iteration(
+        AutoSceneSelfIterationOptions(
+            scene_options=AutoSceneOptions(
+                request=args.request,
+                output_dir=workdir,
+                config_path=Path(args.config),
+                output_views=args.views,
+                quality_mode=args.quality,
+                geometry_mode=args.geometry,
+                style_preset=args.style,
+                backend_model_key=args.model_key,
+                backend=args.backend,
+                num_candidates_per_view=args.candidates,
+                max_retries=args.max_retries,
+                seed=args.seed,
+                allow_procedural_fallback=bool(args.allow_procedural_fallback),
+                require_concept_confirmation=bool(args.require_concept_confirmation),
+                dry_run=bool(args.dry_run or args.backend == "mock"),
+                use_llm=not args.no_llm,
+                render_backend=args.render_backend,
+                hero_model_path=Path(args.hero_model) if args.hero_model else None,
+            ),
+            image2_provider=args.image2_provider,
+            max_cycles=args.max_cycles,
+            codex_home=Path(args.codex_home) if args.codex_home else None,
+            after_timestamp=args.after_timestamp,
+            newest_first=bool(args.newest_first),
+            allow_mock_image2=bool(args.allow_mock_image2),
+        )
+    )
+    report = result["report"]
+    summary = result.get("summary", {})
+    print(
+        json.dumps(
+            {
+                "status": result["status"],
+                "workdir": str(workdir),
+                "auto_scene_summary": str(workdir / "auto_scene_summary.json"),
+                "self_iteration_report": str(workdir / "reports" / "self_iteration_report.json"),
+                "final_summary_status": summary.get("status", ""),
+                "cycle_count": report.get("cycle_count", 0),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0 if result["status"] in {"complete", "needs_review"} else 2
 
 
 def _parse_image2_import_args(values: list[str]) -> tuple[Path | None, dict[str, Path]]:
@@ -870,6 +925,40 @@ def build_parser() -> argparse.ArgumentParser:
     auto_scene.add_argument("--render-backend", default="auto", choices=["auto", "procedural", "blender"], help="Render assembled scene channels with auto, procedural, or Blender backend")
     auto_scene.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
     auto_scene.set_defaults(func=cmd_auto_scene)
+
+    auto_scene_self = subparsers.add_parser(
+        "auto-scene-self-iterate",
+        help="Run Auto Scene with an image2 executor loop for concept/module/final image handoffs and position retries",
+    )
+    auto_scene_self.add_argument("--request", required=True, help="Natural language scene request")
+    auto_scene_self.add_argument("--output", help="Output workdir, defaults to outputs/auto_scene/scene-<timestamp>")
+    auto_scene_self.add_argument("--views", type=int, default=3)
+    auto_scene_self.add_argument("--quality", default="balanced", choices=["fast", "balanced", "high"])
+    auto_scene_self.add_argument("--geometry", default="strict", choices=["loose", "balanced", "strict"])
+    auto_scene_self.add_argument("--style", default="exhibition", choices=["product", "cinematic", "ecommerce", "concept", "exhibition", "architecture"])
+    auto_scene_self.add_argument("--model-key")
+    auto_scene_self.add_argument("--backend", help="Use mock for dry CPU validation")
+    auto_scene_self.add_argument("--candidates", type=int, default=3)
+    auto_scene_self.add_argument("--max-retries", type=int, default=2)
+    auto_scene_self.add_argument("--seed", type=int, default=20260610)
+    auto_scene_self.add_argument("--allow-procedural-fallback", action="store_true", default=True)
+    auto_scene_self.add_argument("--require-concept-confirmation", action="store_true")
+    auto_scene_self.add_argument("--dry-run", action="store_true", help="Use mock image, 3D, render, and AI backends")
+    auto_scene_self.add_argument("--no-llm", action="store_true", help="Only for dry-run/mock validation; real Auto Scene requires the configured multimodal planner")
+    auto_scene_self.add_argument("--render-backend", default="auto", choices=["auto", "procedural", "blender"], help="Render assembled scene channels with auto, procedural, or Blender backend")
+    auto_scene_self.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
+    auto_scene_self.add_argument(
+        "--image2-provider",
+        default="filesystem_then_codex_latest",
+        choices=["filesystem_then_codex_latest", "filesystem", "codex_latest", "codex_generated_images", "command", "mock"],
+        help="Provider used by the self-iteration loop to satisfy pending image2 requests",
+    )
+    auto_scene_self.add_argument("--max-cycles", type=int, default=8, help="Maximum self-iteration cycles before stopping")
+    auto_scene_self.add_argument("--codex-home", help="Override CODEX_HOME when image2-provider scans generated_images")
+    auto_scene_self.add_argument("--after-timestamp", type=float, help="Only import Codex generated image files newer than this Unix timestamp")
+    auto_scene_self.add_argument("--newest-first", action="store_true", help="Map newest generated files to request order")
+    auto_scene_self.add_argument("--allow-mock-image2", action="store_true", help="Enable mock image2 provider for smoke tests")
+    auto_scene_self.set_defaults(func=cmd_auto_scene_self_iterate)
 
     image2_import = subparsers.add_parser("auto-scene-import-image2", help="Import Codex image2 outputs into an Auto Scene pending request")
     image2_import.add_argument("--request", required=True, help="Path to imagegen_request.json, imagegen_batch_request.json, or codex_image2_final_request.json")

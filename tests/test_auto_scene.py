@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from local3dai.auto_scene import (
     AutoSceneOptions,
+    AutoSceneSelfIterationOptions,
     ExternalImagegenRequired,
     SceneToolExecutor,
     _binary_bbox,
@@ -28,6 +29,7 @@ from local3dai.auto_scene import (
     create_white_model_multiview_position_lock_report,
     create_white_model_position_lock_report,
     create_white_model_position_contract,
+    execute_auto_scene_image2_request,
     fit_final_images_to_white_model_positions,
     generate_concept_image,
     generate_codex_image2_final_render,
@@ -43,6 +45,7 @@ from local3dai.auto_scene import (
     render_scene_channels,
     review_module_reference_images,
     run_auto_scene,
+    run_auto_scene_self_iteration,
     select_scene_camera,
     validate_module_layout_contract,
 )
@@ -1092,6 +1095,130 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(batch["requests"][0]["fulfilled_output_path"], str(car_output.resolve()))
             self.assertEqual(batch["requests"][1]["fulfilled_output_path"], str(screen_output.resolve()))
             self.assertNotIn("negative_prompt", json.dumps(batch, ensure_ascii=False))
+
+    def test_execute_auto_scene_image2_request_mock_generates_and_imports_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            car_output = root / "modules" / "main_vehicle" / "reference.png"
+            screen_output = root / "modules" / "display_screen" / "reference.png"
+            batch_path = write_manifest(
+                root / "modules" / "imagegen_batch_request.json",
+                {
+                    "type": "external_imagegen_batch_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "module_reference_batch",
+                    "requests": [
+                        {"kind": "module_reference", "module_id": "main_vehicle", "output_path": str(car_output), "prompt": "front orthographic module"},
+                        {"kind": "module_reference", "module_id": "display_screen", "output_path": str(screen_output), "prompt": "front orthographic screen"},
+                    ],
+                },
+            )
+
+            report = execute_auto_scene_image2_request(batch_path, provider="mock", allow_mock=True)
+
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["import"]["import_count"], 2)
+            self.assertTrue(car_output.exists())
+            self.assertTrue(screen_output.exists())
+            request = read_manifest(batch_path)
+            self.assertEqual(request["status"], "fulfilled_by_codex_image2")
+            self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
+
+    def test_run_auto_scene_self_iteration_executes_pending_image2_then_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {
+                    "type": "external_imagegen_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "concept",
+                    "output_path": str(root / "concept" / "global_concept.png"),
+                    "prompt": "model concept prompt",
+                },
+            )
+            options = self._options(root)
+            options.config_path = root / "config.json"
+            write_manifest(options.config_path, {"paths": {"outputs_dir": str(root.parent)}, "reference_generation": {"provider": "external_imagegen"}})
+
+            calls = {"count": 0}
+
+            def fake_run(scene_options: AutoSceneOptions) -> dict[str, object]:
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return {
+                        "status": "awaiting_external_imagegen",
+                        "stage": "concept_image_generation",
+                        "workdir": str(root),
+                        "external_imagegen": {"request_path": str(request_path)},
+                    }
+                reports = root / "reports"
+                reports.mkdir(parents=True, exist_ok=True)
+                write_manifest(reports / "final_position_retry_plan.json", {"status": "not_needed"})
+                write_manifest(root / "auto_scene_summary.json", {"status": "complete", "workdir": str(root), "artifacts": {}, "artifact_urls": {}})
+                return {"status": "complete", "workdir": str(root), "final_position_retry_plan": str(reports / "final_position_retry_plan.json")}
+
+            with patch("local3dai.auto_scene.run_auto_scene", side_effect=fake_run):
+                result = run_auto_scene_self_iteration(
+                    AutoSceneSelfIterationOptions(
+                        scene_options=options,
+                        image2_provider="mock",
+                        max_cycles=3,
+                        allow_mock_image2=True,
+                    )
+                )
+
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(calls["count"], 2)
+            self.assertTrue((root / "concept" / "global_concept.png").exists())
+            self.assertTrue((root / "reports" / "self_iteration_report.json").exists())
+            report = read_manifest(root / "reports" / "self_iteration_report.json")
+            self.assertEqual(report["cycle_count"], 2)
+            self.assertEqual(report["cycles"][0]["image2_execution"]["status"], "complete")
+
+    def test_run_auto_scene_self_iteration_stops_on_repeated_image2_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            retry_request = root / "final" / "codex_image2_position_retry_request.json"
+            retry_request.parent.mkdir(parents=True, exist_ok=True)
+            write_manifest(retry_request, {"requests": [{"view_id": "view_hero", "output_path": str(root / "final" / "final_view_hero.png")}]})
+            write_manifest(
+                root / "reports" / "final_position_retry_plan.json",
+                {"status": "awaiting_codex_image2_retry", "retry_request": str(retry_request)},
+            )
+            options = self._options(root)
+            options.config_path = root / "config.json"
+            write_manifest(options.config_path, {"paths": {"outputs_dir": str(root.parent)}})
+
+            def fake_run(scene_options: AutoSceneOptions) -> dict[str, object]:
+                return {
+                    "status": "needs_review",
+                    "workdir": str(root),
+                    "final_position_retry_plan": str(root / "reports" / "final_position_retry_plan.json"),
+                }
+
+            with (
+                patch("local3dai.auto_scene.run_auto_scene", side_effect=fake_run),
+                patch(
+                    "local3dai.auto_scene.execute_auto_scene_image2_request",
+                    return_value={"status": "rejected_by_position_lock", "import": {"failed_views": ["view_hero"]}},
+                ),
+            ):
+                result = run_auto_scene_self_iteration(
+                    AutoSceneSelfIterationOptions(
+                        scene_options=options,
+                        image2_provider="mock",
+                        max_cycles=5,
+                        allow_mock_image2=True,
+                    )
+                )
+
+            self.assertEqual(result["status"], "needs_review")
+            report = result["report"]
+            self.assertEqual(report["cycle_count"], 2)
+            self.assertEqual(report["cycles"][-1]["stop_reason"], "repeated_image2_execution_failure")
 
     def test_import_latest_codex_image2_single_request_scans_generated_images(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

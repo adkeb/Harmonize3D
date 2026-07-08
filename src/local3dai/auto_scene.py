@@ -193,6 +193,17 @@ class AutoSceneOptions:
     hero_model_path: Path | None = None
 
 
+@dataclass
+class AutoSceneSelfIterationOptions:
+    scene_options: AutoSceneOptions
+    image2_provider: str = "filesystem_then_codex_latest"
+    max_cycles: int = 8
+    codex_home: Path | None = None
+    after_timestamp: float | None = None
+    newest_first: bool = False
+    allow_mock_image2: bool = False
+
+
 class ExternalImagegenRequired(RuntimeError):
     def __init__(self, request_path: Path) -> None:
         self.request_path = Path(request_path)
@@ -2278,6 +2289,435 @@ def import_latest_codex_image2_results(
     summary["after_timestamp"] = after
     write_manifest(Path(summary["request_path"]).with_name("codex_image2_import.json"), summary)
     return summary
+
+
+def _normalize_image2_provider(provider: str | None) -> str:
+    text = str(provider or "filesystem_then_codex_latest").strip().lower().replace("-", "_")
+    aliases = {
+        "filesystem": "filesystem",
+        "existing": "filesystem",
+        "existing_outputs": "filesystem",
+        "codex": "codex_latest",
+        "codex_latest": "codex_latest",
+        "codex_generated": "codex_latest",
+        "codex_generated_images": "codex_latest",
+        "filesystem_then_codex": "filesystem_then_codex_latest",
+        "filesystem_then_codex_latest": "filesystem_then_codex_latest",
+        "auto": "filesystem_then_codex_latest",
+        "command": "command",
+        "external_command": "command",
+        "mock": "mock",
+        "mock_image2": "mock",
+    }
+    return aliases.get(text, text or "filesystem_then_codex_latest")
+
+
+def _image2_output_path_for_item(item: dict[str, Any]) -> Path:
+    raw = str(item.get("output_path") or item.get("output") or "").strip()
+    if not raw:
+        raise ValueError(f"Image2 request item is missing output_path: {item}")
+    return Path(raw).expanduser().resolve()
+
+
+def _existing_image2_output_sources(request: dict[str, Any]) -> tuple[Path | None, dict[str, Path]]:
+    items = _codex_image2_request_items(request)
+    image_path: Path | None = None
+    mappings: dict[str, Path] = {}
+    for item in items:
+        output = _image2_output_path_for_item(item)
+        if not _valid_image(output):
+            raise FileNotFoundError(f"Image2 output is not available yet: {output}")
+        if len(items) == 1:
+            image_path = output
+            continue
+        keys = _codex_image2_request_keys(item)
+        if not keys:
+            raise ValueError(f"Cannot map existing output without a stable request key: {item}")
+        mappings[keys[0]] = output
+    return image_path, mappings
+
+
+def _primary_image2_reference_for_mock(item: dict[str, Any]) -> Path | None:
+    input_images = item.get("input_images")
+    if isinstance(input_images, list):
+        preferred_roles = (
+            "white_model_rgb_position_lock",
+            "source_image",
+            "concept_reference",
+            "position_contract_measurement_reference",
+        )
+        for role in preferred_roles:
+            for image in input_images:
+                if not isinstance(image, dict):
+                    continue
+                path = Path(str(image.get("path") or "")).expanduser()
+                if str(image.get("role") or "") == role and _valid_image(path):
+                    return path.resolve()
+        for image in input_images:
+            if not isinstance(image, dict):
+                continue
+            path = Path(str(image.get("path") or "")).expanduser()
+            if _valid_image(path):
+                return path.resolve()
+    source = Path(str(item.get("source_image") or "")).expanduser()
+    if _valid_image(source):
+        return source.resolve()
+    return None
+
+
+def _write_mock_image2_output(item: dict[str, Any], *, output: Path, seed: int) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    reference = _primary_image2_reference_for_mock(item)
+    kind = str(item.get("kind") or item.get("type") or "")
+    if reference is not None and ("final_render" in kind or "position_retry" in kind):
+        # Mock final renders preserve the white-model pixels exactly so CI can test
+        # orchestration and position-lock gates without introducing a fake renderer.
+        with Image.open(reference) as image:
+            image.convert("RGB").save(output)
+        return output
+    if reference is not None:
+        with Image.open(reference) as image:
+            canvas = image.convert("RGB").resize((768, 768), Image.Resampling.LANCZOS)
+        overlay = Image.new("RGB", canvas.size, (240, 243, 247))
+        canvas = Image.blend(overlay, canvas, 0.78)
+        draw = ImageDraw.Draw(canvas)
+        margin = 96
+        draw.rounded_rectangle(
+            [margin, margin, canvas.width - margin, canvas.height - margin],
+            radius=32,
+            outline=(44, 93, 150),
+            width=6,
+        )
+        canvas.save(output)
+        return output
+    prompt = str(item.get("prompt") or "")
+    prompt_seed = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8], 16) if prompt else seed
+    mock_kind = "reference" if "module_reference" in kind else "concept"
+    _draw_mock_scene(output, kind=mock_kind, seed=prompt_seed, size=768)
+    return output
+
+
+def _mock_image2_sources_for_request(request_path: Path, request: dict[str, Any], *, seed: int = 20260610) -> tuple[Path | None, dict[str, Path], dict[str, Any]]:
+    items = _codex_image2_request_items(request)
+    generated_dir = request_path.parent / "self_image2_outputs" / time.strftime("%Y%m%d-%H%M%S")
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    image_path: Path | None = None
+    mappings: dict[str, Path] = {}
+    outputs: list[dict[str, str]] = []
+    for index, item in enumerate(items, start=1):
+        keys = _codex_image2_request_keys(item)
+        key = keys[0] if keys else f"item_{index}"
+        output = generated_dir / f"{_safe_view_file_stem(key)}.png"
+        _write_mock_image2_output(item, output=output, seed=seed + index * 997)
+        outputs.append(
+            {
+                "key": key,
+                "kind": str(item.get("kind") or item.get("type") or ""),
+                "output": _absolute_artifact_path(output),
+                "declared_output_path": _absolute_artifact_path(item.get("output_path") or item.get("output")),
+            }
+        )
+        if len(items) == 1:
+            image_path = output
+        else:
+            mappings[key] = output
+    executor_report = {
+        "type": "auto_scene_image2_executor",
+        "provider": "mock",
+        "status": "complete",
+        "request_path": _absolute_artifact_path(request_path),
+        "generated_dir": _absolute_artifact_path(generated_dir),
+        "outputs": outputs,
+        "note": "Mock image2 is for automated smoke tests; real runs should use command or Codex generated-images providers.",
+    }
+    write_manifest(generated_dir / "executor_report.json", executor_report)
+    return image_path, mappings, executor_report
+
+
+def _command_for_image2_item(config: dict[str, Any], request_path: Path, item: dict[str, Any], *, index: int) -> str:
+    executor_cfg = config.get("image2_executor", {}) if isinstance(config.get("image2_executor"), dict) else {}
+    command_template = str(executor_cfg.get("command") or "").strip()
+    if not command_template:
+        raise RuntimeError("image2_executor.command is required when image2_provider=command.")
+    output_path = _image2_output_path_for_item(item)
+    prompt_path = str(item.get("prompt_file") or "")
+    return command_template.format(
+        request_path=str(request_path),
+        output_path=str(output_path),
+        prompt_file=prompt_path,
+        index=index,
+        kind=str(item.get("kind") or item.get("type") or ""),
+        module_id=str(item.get("module_id") or ""),
+        view_id=str(item.get("view_id") or ""),
+    )
+
+
+def _run_command_image2_request(request_path: Path, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    executor_cfg = config.get("image2_executor", {}) if isinstance(config.get("image2_executor"), dict) else {}
+    timeout = float(executor_cfg.get("timeout_seconds", 900))
+    calls: list[dict[str, Any]] = []
+    for index, item in enumerate(_codex_image2_request_items(request), start=1):
+        command = _command_for_image2_item(config, request_path, item, index=index)
+        output_path = _image2_output_path_for_item(item)
+        env = os.environ.copy()
+        env.update(
+            {
+                "H3D_IMAGE2_REQUEST_PATH": str(request_path),
+                "H3D_IMAGE2_OUTPUT_PATH": str(output_path),
+                "H3D_IMAGE2_PROMPT": str(item.get("prompt") or ""),
+                "H3D_IMAGE2_ITEM_JSON": json.dumps(item, ensure_ascii=False),
+            }
+        )
+        started = time.time()
+        completed = subprocess.run(command, shell=True, cwd=str(request_path.parents[1]), env=env, text=True, capture_output=True, timeout=timeout)
+        call = {
+            "index": index,
+            "kind": str(item.get("kind") or item.get("type") or ""),
+            "module_id": str(item.get("module_id") or ""),
+            "view_id": str(item.get("view_id") or ""),
+            "output_path": str(output_path),
+            "returncode": completed.returncode,
+            "elapsed_seconds": round(time.time() - started, 3),
+            "stdout_tail": completed.stdout[-2000:],
+            "stderr_tail": completed.stderr[-2000:],
+        }
+        calls.append(call)
+        if completed.returncode != 0:
+            raise RuntimeError(f"image2 command failed for {output_path}: {completed.stderr[-500:]}")
+        if not _valid_image(output_path):
+            raise FileNotFoundError(f"image2 command did not produce a valid image: {output_path}")
+    report = {
+        "type": "auto_scene_image2_executor",
+        "provider": "command",
+        "status": "complete",
+        "request_path": _absolute_artifact_path(request_path),
+        "calls": calls,
+    }
+    write_manifest(request_path.with_name("image2_executor_command_report.json"), report)
+    return report
+
+
+def execute_auto_scene_image2_request(
+    request_path: Path,
+    *,
+    provider: str = "filesystem_then_codex_latest",
+    config: dict[str, Any] | None = None,
+    codex_home: Path | None = None,
+    after_timestamp: float | None = None,
+    newest_first: bool = False,
+    allow_mock: bool = False,
+) -> dict[str, Any]:
+    """Execute or import one Auto Scene image2 request through a configured provider."""
+    request_path = Path(request_path).expanduser().resolve()
+    request = read_manifest(request_path)
+    normalized = _normalize_image2_provider(provider)
+    started = time.time()
+    executor_report: dict[str, Any] = {}
+    try:
+        if normalized == "filesystem":
+            image_path, mappings = _existing_image2_output_sources(request)
+            import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
+        elif normalized == "codex_latest":
+            import_summary = import_latest_codex_image2_results(
+                request_path,
+                codex_home=codex_home,
+                after_timestamp=after_timestamp,
+                newest_first=newest_first,
+            )
+        elif normalized == "filesystem_then_codex_latest":
+            try:
+                image_path, mappings = _existing_image2_output_sources(request)
+                import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
+                import_summary["source"] = "existing_request_output_paths"
+            except FileNotFoundError:
+                import_summary = import_latest_codex_image2_results(
+                    request_path,
+                    codex_home=codex_home,
+                    after_timestamp=after_timestamp,
+                    newest_first=newest_first,
+                )
+        elif normalized == "command":
+            executor_report = _run_command_image2_request(request_path, request, config or {})
+            image_path, mappings = _existing_image2_output_sources(read_manifest(request_path))
+            import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
+            import_summary["source"] = "image2_executor_command"
+        elif normalized == "mock":
+            if not allow_mock:
+                raise RuntimeError("Mock image2 provider is disabled. Pass allow_mock=True or use --allow-mock-image2 for smoke tests.")
+            image_path, mappings, executor_report = _mock_image2_sources_for_request(request_path, request)
+            import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
+            import_summary["source"] = "mock_image2_executor"
+        else:
+            raise ValueError(f"Unsupported image2 provider: {provider}")
+    except Exception as exc:
+        report = {
+            "type": "auto_scene_image2_executor",
+            "provider": normalized,
+            "status": "failed",
+            "request_path": _absolute_artifact_path(request_path),
+            "error": str(exc),
+            "elapsed_seconds": round(time.time() - started, 3),
+        }
+        write_manifest(request_path.with_name("image2_executor_report.json"), report)
+        raise
+    report = {
+        "type": "auto_scene_image2_executor",
+        "provider": normalized,
+        "status": import_summary.get("status", ""),
+        "request_path": _absolute_artifact_path(request_path),
+        "import": import_summary,
+        "executor_report": executor_report,
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
+    write_manifest(request_path.with_name("image2_executor_report.json"), report)
+    return report
+
+
+def _pending_image2_request_from_summary(summary: dict[str, Any]) -> Path | None:
+    if str(summary.get("status") or "") != "awaiting_external_imagegen":
+        return None
+    external = summary.get("external_imagegen") if isinstance(summary.get("external_imagegen"), dict) else {}
+    request_path = str(external.get("request_path") or "")
+    if not request_path:
+        return None
+    path = Path(request_path).expanduser()
+    return path.resolve() if path.exists() else path
+
+
+def _retry_request_from_auto_scene_summary(summary: dict[str, Any]) -> Path | None:
+    workdir = Path(str(summary.get("workdir") or "")).expanduser()
+    plan_path = Path(str(summary.get("final_position_retry_plan") or "")).expanduser()
+    if not plan_path.exists() and workdir:
+        plan_path = workdir / "reports" / "final_position_retry_plan.json"
+    if not plan_path.exists():
+        return None
+    plan = _read_manifest_or_empty(plan_path)
+    if str(plan.get("status") or "") != "awaiting_codex_image2_retry":
+        return None
+    retry_request = Path(str(plan.get("retry_request") or "")).expanduser()
+    if not retry_request.is_absolute() and workdir:
+        retry_request = workdir / retry_request
+    return retry_request.resolve() if retry_request.exists() else retry_request
+
+
+def run_auto_scene_self_iteration(options: AutoSceneSelfIterationOptions) -> dict[str, Any]:
+    """Run Auto Scene repeatedly until image2 handoffs and position retries settle."""
+    scene_options = options.scene_options
+    workdir = Path(scene_options.output_dir).expanduser().resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    config = load_config(scene_options.config_path)
+    cycles: list[dict[str, Any]] = []
+    final_summary: dict[str, Any] = {}
+    status = "failed"
+    repeated_failure_counts: dict[str, int] = {}
+    for cycle_index in range(1, max(1, int(options.max_cycles)) + 1):
+        summary = run_auto_scene(scene_options)
+        final_summary = summary
+        cycle: dict[str, Any] = {
+            "cycle": cycle_index,
+            "summary_status": summary.get("status", ""),
+            "stage": summary.get("stage", ""),
+            "workdir": _absolute_artifact_path(workdir),
+        }
+        request_path = _pending_image2_request_from_summary(summary)
+        if request_path is not None:
+            cycle["image2_request"] = _absolute_artifact_path(request_path)
+            cycle["image2_execution"] = execute_auto_scene_image2_request(
+                request_path,
+                provider=options.image2_provider,
+                config=config,
+                codex_home=options.codex_home,
+                after_timestamp=options.after_timestamp,
+                newest_first=options.newest_first,
+                allow_mock=options.allow_mock_image2,
+            )
+            cycles.append(cycle)
+            execution_status = str(cycle["image2_execution"].get("status") or "")
+            failure_signature = json.dumps(
+                {
+                    "request": _absolute_artifact_path(request_path),
+                    "status": execution_status,
+                    "failed_views": cycle["image2_execution"].get("import", {}).get("failed_views", []),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if execution_status and execution_status != "complete":
+                repeated_failure_counts[failure_signature] = repeated_failure_counts.get(failure_signature, 0) + 1
+                if repeated_failure_counts[failure_signature] >= 2:
+                    status = "needs_review"
+                    cycle["stop_reason"] = "repeated_image2_execution_failure"
+                    break
+            continue
+
+        retry_request = _retry_request_from_auto_scene_summary(summary)
+        if retry_request is not None:
+            cycle["position_retry_request"] = _absolute_artifact_path(retry_request)
+            cycle["image2_execution"] = execute_auto_scene_image2_request(
+                retry_request,
+                provider=options.image2_provider,
+                config=config,
+                codex_home=options.codex_home,
+                after_timestamp=options.after_timestamp,
+                newest_first=options.newest_first,
+                allow_mock=options.allow_mock_image2,
+            )
+            cycles.append(cycle)
+            execution_status = str(cycle["image2_execution"].get("status") or "")
+            failure_signature = json.dumps(
+                {
+                    "request": _absolute_artifact_path(retry_request),
+                    "status": execution_status,
+                    "failed_views": cycle["image2_execution"].get("import", {}).get("failed_views", []),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if execution_status and execution_status != "complete":
+                repeated_failure_counts[failure_signature] = repeated_failure_counts.get(failure_signature, 0) + 1
+                if repeated_failure_counts[failure_signature] >= 2:
+                    status = "needs_review"
+                    cycle["stop_reason"] = "repeated_image2_execution_failure"
+                    break
+            continue
+
+        status = str(summary.get("status") or "complete")
+        cycles.append(cycle)
+        break
+    else:
+        status = str(final_summary.get("status") or "max_cycles_exhausted")
+
+    report = {
+        "type": "auto_scene_self_iteration_report",
+        "status": status,
+        "workdir": _absolute_artifact_path(workdir),
+        "image2_provider": _normalize_image2_provider(options.image2_provider),
+        "max_cycles": int(options.max_cycles),
+        "cycle_count": len(cycles),
+        "cycles": cycles,
+        "final_summary_status": final_summary.get("status", ""),
+        "auto_scene_summary": _absolute_artifact_path(workdir / "auto_scene_summary.json"),
+        "responsibility_boundary": {
+            "agent_model": "plans scene, reviews concept/modules, assembles 3D, chooses camera, writes image2 prompts, validates reports",
+            "image2_model": "materializes concept/module/final images from request JSON through the configured provider",
+            "codex_orchestrator": "runs this loop, checks reports, and adjusts configuration or provider wiring when gates fail",
+        },
+    }
+    write_manifest(workdir / "reports" / "self_iteration_report.json", report)
+    if final_summary:
+        summary_path = workdir / "auto_scene_summary.json"
+        if summary_path.exists():
+            persisted = _read_manifest_or_empty(summary_path)
+            persisted["self_iteration_report"] = _absolute_artifact_path(workdir / "reports" / "self_iteration_report.json")
+            artifacts = persisted.setdefault("artifacts", {})
+            if isinstance(artifacts, dict):
+                artifacts["self_iteration_report"] = persisted["self_iteration_report"]
+            artifact_urls = persisted.setdefault("artifact_urls", {})
+            if isinstance(artifact_urls, dict):
+                artifact_urls["self_iteration_report"] = f"/api/file?path={persisted['self_iteration_report']}"
+            write_manifest(summary_path, persisted)
+            final_summary = persisted
+    return {"status": status, "report": report, "summary": final_summary}
 
 
 def _read_manifest_or_empty(path: Path) -> dict[str, Any]:
