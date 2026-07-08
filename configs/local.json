@@ -58,6 +58,21 @@
     "dashscope_retry_delay_seconds": 8,
     "max_review_attempts": 3
   },
+  "image2_executor": {
+    "provider": "local_model",
+    "model_key": "flux2_klein_4b",
+    "reference_model_key": "flux2_klein_4b",
+    "final_model_key": "flux2_klein_4b",
+    "seed": 20260610,
+    "concept_width": 1024,
+    "concept_height": 1024,
+    "module_width": 1024,
+    "module_height": 1024,
+    "final_width": 1024,
+    "final_height": 1024,
+    "timeout_seconds": 900,
+    "command": ""
+  },
   "models": {
     "hunyuan3d_2_1_shape": {
       "backend": "hunyuan3d-shape",

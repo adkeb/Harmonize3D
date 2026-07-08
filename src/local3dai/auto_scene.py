@@ -2306,6 +2306,12 @@ def _normalize_image2_provider(provider: str | None) -> str:
         "auto": "filesystem_then_codex_latest",
         "command": "command",
         "external_command": "command",
+        "local": "local_model",
+        "local_model": "local_model",
+        "internal": "local_model",
+        "internal_model": "local_model",
+        "internal_image2": "local_model",
+        "image2_model": "local_model",
         "mock": "mock",
         "mock_image2": "mock",
     }
@@ -2434,6 +2440,248 @@ def _mock_image2_sources_for_request(request_path: Path, request: dict[str, Any]
     return image_path, mappings, executor_report
 
 
+def _image2_executor_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("image2_executor", {}) if isinstance(config.get("image2_executor"), dict) else {}
+
+
+def _local_image2_model_key(config: dict[str, Any], *, final_render: bool) -> str:
+    executor_cfg = _image2_executor_config(config)
+    if final_render:
+        return str(
+            executor_cfg.get("final_model_key")
+            or executor_cfg.get("model_key")
+            or config.get("agent", {}).get("default_model_key")
+            or config.get("ai", {}).get("default_model_key")
+            or "flux2_klein_4b"
+        )
+    return str(
+        executor_cfg.get("reference_model_key")
+        or executor_cfg.get("model_key")
+        or config.get("reference_generation", {}).get("default_model_key")
+        or config.get("ai", {}).get("default_model_key")
+        or "flux2_klein_4b"
+    )
+
+
+def _image2_dimensions_for_item(config: dict[str, Any], item: dict[str, Any], *, final_render: bool) -> tuple[int, int]:
+    executor_cfg = _image2_executor_config(config)
+    kind = str(item.get("kind") or item.get("type") or "")
+    if final_render:
+        model_key = _local_image2_model_key(config, final_render=True)
+        model = _model_cfg(config, model_key)
+        width = int(executor_cfg.get("final_width") or model.get("width") or config.get("ai", {}).get("width") or 1024)
+        height = int(executor_cfg.get("final_height") or model.get("height") or config.get("ai", {}).get("height") or width)
+        return width, height
+    ref_cfg = config.get("reference_generation", {}) if isinstance(config.get("reference_generation"), dict) else {}
+    if kind == "concept":
+        width = int(executor_cfg.get("concept_width") or ref_cfg.get("concept_width") or ref_cfg.get("width") or 1024)
+        height = int(executor_cfg.get("concept_height") or ref_cfg.get("concept_height") or ref_cfg.get("height") or width)
+        return width, height
+    width = int(executor_cfg.get("module_width") or ref_cfg.get("width") or 1024)
+    height = int(executor_cfg.get("module_height") or ref_cfg.get("height") or width)
+    return width, height
+
+
+def _request_item_is_final_render(item: dict[str, Any]) -> bool:
+    kind = str(item.get("kind") or item.get("type") or "")
+    return "final_render" in kind or "position_retry" in kind
+
+
+def _request_is_final_render_batch(request: dict[str, Any]) -> bool:
+    if _codex_image2_request_requires_position_validation(request):
+        return True
+    return any(_request_item_is_final_render(item) for item in _codex_image2_request_items(request))
+
+
+def _write_single_view_render_manifest(render_manifest: str | Path, item: dict[str, Any], output_path: Path) -> Path:
+    manifest = read_manifest(render_manifest)
+    source_view_id = str(item.get("source_render_view_id") or item.get("view_id") or "")
+    views = [view for view in manifest.get("views", []) if isinstance(view, dict)]
+    selected = next((view for view in views if str(view.get("view_id") or "") == source_view_id), None)
+    if selected is None and source_view_id == "view_hero":
+        selected = next((view for view in views if str(view.get("view_id") or "") == "view_locked"), None)
+    if selected is None and views:
+        selected = views[0]
+    if selected is None:
+        raise ValueError(f"Cannot find render view for local image2 item: {source_view_id}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_manifest(
+        output_path,
+        {
+            **manifest,
+            "type": "render_manifest",
+            "source_manifest": _absolute_artifact_path(render_manifest),
+            "views": [selected],
+        },
+    )
+    return output_path
+
+
+def _local_model_generate_reference_item(
+    *,
+    config: dict[str, Any],
+    item: dict[str, Any],
+    output: Path,
+    seed: int,
+) -> dict[str, Any]:
+    model_key = _local_image2_model_key(config, final_render=False)
+    width, height = _image2_dimensions_for_item(config, item, final_render=False)
+    prompt = str(item.get("prompt") or "")
+    model = _model_cfg(config, model_key)
+    if str(model.get("backend") or "") == "mock":
+        _write_mock_image2_output(item, output=output, seed=seed)
+        return {
+            "created_by": "mock_local_image2_reference_generation",
+            "model_key": model_key,
+            "backend": "mock",
+            "path": _absolute_artifact_path(output),
+            "prompt": prompt,
+        }
+    generation = _generate_prompt_reference_image(
+        config=config,
+        prompt=prompt,
+        output=output,
+        seed=seed,
+        width=width,
+        height=height,
+        model_key=model_key,
+    )
+    return {
+        **generation,
+        "created_by": "local_model_image2_reference_generation",
+        "model_key": model_key,
+        "width": width,
+        "height": height,
+    }
+
+
+def _local_model_generate_final_item(
+    *,
+    config: dict[str, Any],
+    request_path: Path,
+    request: dict[str, Any],
+    item: dict[str, Any],
+    output: Path,
+    seed: int,
+) -> dict[str, Any]:
+    render_manifest = _render_manifest_for_codex_image2_request(request, request_path)
+    if render_manifest is None:
+        raise FileNotFoundError(f"Local image2 final render requires render_manifest in request: {request_path}")
+    model_key = _local_image2_model_key(config, final_render=True)
+    model = _model_cfg(config, model_key)
+    backend_name = str(model.get("backend") or config.get("ai", {}).get("default_backend") or "")
+    width, height = _image2_dimensions_for_item(config, item, final_render=True)
+    item_manifest = _write_single_view_render_manifest(
+        render_manifest,
+        item,
+        request_path.parent / "self_image2_render_manifests" / f"{_safe_view_file_stem(str(item.get('view_id') or 'view'))}.json",
+    )
+    output_dir = request_path.parent / "self_image2_outputs" / time.strftime("%Y%m%d-%H%M%S") / _safe_view_file_stem(str(item.get("view_id") or "view"))
+    backend = build_backend(backend_name)
+    manifest_path = backend.generate(
+        item_manifest,
+        output_dir,
+        prompt=str(item.get("prompt") or ""),
+        candidates_per_view=1,
+        seed=seed,
+        model_ref=model.get("local_path") or model.get("model_path") or model.get("model_id", ""),
+        model_config=model,
+        negative_prompt="",
+        device=config.get("ai", {}).get("device", "cuda:0"),
+        dtype=model.get("dtype") or config.get("ai", {}).get("dtype", "bfloat16"),
+        variant=model.get("variant") or config.get("ai", {}).get("variant"),
+        steps=int(model.get("steps", config.get("ai", {}).get("steps", 4))),
+        guidance_scale=float(model.get("guidance_scale", config.get("ai", {}).get("guidance_scale", 1.0))),
+        width=width,
+        height=height,
+        reference_channels=list(model.get("reference_channels", ["rgb", "edge", "depth", "normal", "mask", "skeleton"])),
+        geometry_lock=bool(model.get("geometry_lock", False)),
+        mesh_position_lock=True,
+        max_sequence_length=int(model.get("max_sequence_length", 512)),
+        enable_model_cpu_offload=bool(model.get("enable_model_cpu_offload", True)),
+    )
+    manifest = read_manifest(manifest_path)
+    candidates = [candidate for candidate in manifest.get("candidates", []) if isinstance(candidate, dict)]
+    if not candidates:
+        raise RuntimeError(f"Local image2 final provider produced no candidates: {manifest_path}")
+    generated = Path(str(candidates[0].get("file") or "")).expanduser()
+    if not _valid_image(generated):
+        raise RuntimeError(f"Local image2 final candidate is not a valid image: {generated}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(generated, output)
+    return {
+        "created_by": "local_model_image2_final_render",
+        "model_key": model_key,
+        "backend": backend_name,
+        "path": _absolute_artifact_path(output),
+        "ai_manifest": _absolute_artifact_path(manifest_path),
+        "single_view_render_manifest": _absolute_artifact_path(item_manifest),
+        "prompt": str(item.get("prompt") or ""),
+        "width": width,
+        "height": height,
+        "reference_policy": "white_model_render_channels",
+    }
+
+
+def _local_model_image2_sources_for_request(
+    request_path: Path,
+    request: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    seed: int = 20260610,
+) -> tuple[Path | None, dict[str, Path], dict[str, Any]]:
+    items = _codex_image2_request_items(request)
+    final_render = _request_is_final_render_batch(request)
+    image_path: Path | None = None
+    mappings: dict[str, Path] = {}
+    outputs: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        output = _image2_output_path_for_item(item)
+        item_seed = int(_image2_executor_config(config).get("seed", seed)) + index * 997
+        if final_render or _request_item_is_final_render(item):
+            generation = _local_model_generate_final_item(
+                config=config,
+                request_path=request_path,
+                request=request,
+                item=item,
+                output=output,
+                seed=item_seed,
+            )
+        else:
+            generation = _local_model_generate_reference_item(
+                config=config,
+                item=item,
+                output=output,
+                seed=item_seed,
+            )
+        keys = _codex_image2_request_keys(item)
+        key = keys[0] if keys else f"item_{index}"
+        outputs.append(
+            {
+                "key": key,
+                "kind": str(item.get("kind") or item.get("type") or ""),
+                "module_id": str(item.get("module_id") or ""),
+                "view_id": str(item.get("view_id") or ""),
+                "output": _absolute_artifact_path(output),
+                "generation": generation,
+            }
+        )
+        if len(items) == 1:
+            image_path = output
+        else:
+            mappings[key] = output
+    report = {
+        "type": "auto_scene_image2_executor",
+        "provider": "local_model",
+        "status": "complete",
+        "request_path": _absolute_artifact_path(request_path),
+        "mode": "final_render" if final_render else "reference_image",
+        "outputs": outputs,
+    }
+    write_manifest(request_path.with_name("local_model_image2_executor_report.json"), report)
+    return image_path, mappings, report
+
+
 def _command_for_image2_item(config: dict[str, Any], request_path: Path, item: dict[str, Any], *, index: int) -> str:
     executor_cfg = config.get("image2_executor", {}) if isinstance(config.get("image2_executor"), dict) else {}
     command_template = str(executor_cfg.get("command") or "").strip()
@@ -2541,6 +2789,14 @@ def execute_auto_scene_image2_request(
             image_path, mappings = _existing_image2_output_sources(read_manifest(request_path))
             import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
             import_summary["source"] = "image2_executor_command"
+        elif normalized == "local_model":
+            image_path, mappings, executor_report = _local_model_image2_sources_for_request(
+                request_path,
+                request,
+                config=config or {},
+            )
+            import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
+            import_summary["source"] = "local_model_image2_executor"
         elif normalized == "mock":
             if not allow_mock:
                 raise RuntimeError("Mock image2 provider is disabled. Pass allow_mock=True or use --allow-mock-image2 for smoke tests.")
@@ -2598,6 +2854,44 @@ def _retry_request_from_auto_scene_summary(summary: dict[str, Any]) -> Path | No
     if not retry_request.is_absolute() and workdir:
         retry_request = workdir / retry_request
     return retry_request.resolve() if retry_request.exists() else retry_request
+
+
+def _auto_scene_live_result_items(workdir: Path, summary: dict[str, Any]) -> list[dict[str, str]]:
+    candidates: list[tuple[str, str, str, Any]] = [
+        ("concept", "Global concept", "image", summary.get("global_concept") or workdir / "concept" / "global_concept.png"),
+        ("module_reference", "Module reference sheet", "image", summary.get("module_references_contact_sheet") or workdir / "final" / "module_references_contact_sheet.png"),
+        ("scene_preview", "Scene assembly preview", "image", summary.get("scene_preview") or workdir / "scene" / "scene_preview.png"),
+        ("render", "White model channels", "image", summary.get("white_channel_contact_sheet") or workdir / "final" / "white_channels_contact_sheet.png"),
+        ("agent", "Final contact sheet", "image", summary.get("contact_sheet") or workdir / "final" / "contact_sheet.png"),
+        ("agent", "White vs final", "image", summary.get("comparison_image") or workdir / "final" / "white_vs_final.png"),
+        ("agent", "Concept vs final", "image", summary.get("concept_vs_final") or workdir / "final" / "concept_vs_final.png"),
+        ("package", "White position lock overlay", "image", summary.get("white_position_lock_overlay") or workdir / "final" / "white_position_lock_overlay.png"),
+    ]
+    final_views = summary.get("final_view_images") if isinstance(summary.get("final_view_images"), dict) else {}
+    for view_id, path in final_views.items():
+        candidates.append(("agent", f"Final view {view_id}", "image", path))
+    output: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for stage, label, kind, raw_path in candidates:
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute():
+            path = workdir / path
+        if not path.exists() or not path.is_file() or not _valid_image(path):
+            continue
+        resolved = _absolute_artifact_path(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        output.append(
+            {
+                "stage": stage,
+                "label": label,
+                "kind": kind,
+                "path": resolved,
+                "codex_markdown": f"![{label}]({resolved})",
+            }
+        )
+    return output
 
 
 def run_auto_scene_self_iteration(options: AutoSceneSelfIterationOptions) -> dict[str, Any]:
@@ -2703,12 +2997,14 @@ def run_auto_scene_self_iteration(options: AutoSceneSelfIterationOptions) -> dic
             "codex_orchestrator": "runs this loop, checks reports, and adjusts configuration or provider wiring when gates fail",
         },
     }
+    report["live_results"] = _auto_scene_live_result_items(workdir, final_summary)
     write_manifest(workdir / "reports" / "self_iteration_report.json", report)
     if final_summary:
         summary_path = workdir / "auto_scene_summary.json"
         if summary_path.exists():
             persisted = _read_manifest_or_empty(summary_path)
             persisted["self_iteration_report"] = _absolute_artifact_path(workdir / "reports" / "self_iteration_report.json")
+            persisted["live_results"] = report["live_results"]
             artifacts = persisted.setdefault("artifacts", {})
             if isinstance(artifacts, dict):
                 artifacts["self_iteration_report"] = persisted["self_iteration_report"]

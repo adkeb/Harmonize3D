@@ -1125,6 +1125,122 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(request["status"], "fulfilled_by_codex_image2")
             self.assertNotIn("negative_prompt", json.dumps(request, ensure_ascii=False))
 
+    def test_execute_auto_scene_image2_request_local_model_generates_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "concept" / "global_concept.png"
+            request_path = write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {
+                    "type": "external_imagegen_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "concept",
+                    "output_path": str(output),
+                    "prompt": "compact futuristic showroom concept",
+                },
+            )
+
+            def fake_reference(**kwargs: object) -> dict[str, object]:
+                target = Path(kwargs["output"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (48, 48), (24, 90, 180)).save(target)
+                return {
+                    "path": str(target),
+                    "created_by": "image2_model_reference_generation",
+                    "model_key": kwargs["model_key"],
+                    "backend": "flux2-klein",
+                    "prompt": kwargs["prompt"],
+                }
+
+            with patch("local3dai.auto_scene._generate_prompt_reference_image", side_effect=fake_reference) as generated:
+                report = execute_auto_scene_image2_request(
+                    request_path,
+                    provider="local_model",
+                    config={
+                        "reference_generation": {"default_model_key": "flux2_klein_4b"},
+                        "image2_executor": {"reference_model_key": "flux2_klein_4b"},
+                        "models": {"flux2_klein_4b": {"backend": "flux2-klein", "enabled": True}},
+                        "ai": {"default_model_key": "flux2_klein_4b"},
+                    },
+                )
+
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["import"]["source"], "local_model_image2_executor")
+            self.assertTrue(output.exists())
+            self.assertEqual(generated.call_args.kwargs["model_key"], "flux2_klein_4b")
+            executor = read_manifest(request_path.with_name("local_model_image2_executor_report.json"))
+            self.assertEqual(executor["provider"], "local_model")
+            self.assertEqual(executor["mode"], "reference_image")
+
+    def test_execute_auto_scene_image2_request_local_model_generates_final_from_render_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            rgb = Image.new("RGB", (128, 128), (34, 36, 40))
+            ImageDraw.Draw(rgb).rectangle((34, 44, 94, 84), fill=(232, 234, 238), outline=(80, 150, 230), width=3)
+            rgb_path = view_dir / "rgb.png"
+            rgb.save(rgb_path)
+            files["rgb"] = str(rgb_path)
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).rectangle((34, 44, 94, 84), fill=255)
+            mask_path = view_dir / "mask.png"
+            mask.convert("RGB").save(mask_path)
+            files["mask"] = str(mask_path)
+            edge = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(edge).rectangle((34, 44, 94, 84), outline=255, width=3)
+            edge_path = view_dir / "edge.png"
+            edge.convert("RGB").save(edge_path)
+            files["edge"] = str(edge_path)
+            for channel in ("depth", "normal"):
+                channel_image = Image.new("RGB", (128, 128), (128, 128, 128))
+                ImageDraw.Draw(channel_image).rectangle((34, 44, 94, 84), fill=(220, 220, 220))
+                path = view_dir / f"{channel}.png"
+                channel_image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(root / "renders" / "render_manifest.json", {"views": [{"view_id": "view_hero", "files": files}]})
+            output = root / "final" / "final_view_hero.png"
+            request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "kind": "final_render_batch",
+                    "status": "awaiting_codex_image2",
+                    "provider": "codex_builtin_image2",
+                    "reference_policy": "white_model_position_locked_render_channels_only",
+                    "render_manifest": str(render_manifest),
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "source_render_view_id": "view_hero",
+                            "kind": "final_render",
+                            "output_path": str(output),
+                            "prompt": "polished material render",
+                            "position_lock_contract": {"status": "pass", "bbox_norm": [0.25, 0.34, 0.75, 0.66], "center_norm": [0.5, 0.5]},
+                        }
+                    ],
+                },
+            )
+
+            report = execute_auto_scene_image2_request(
+                request_path,
+                provider="local_model",
+                config={
+                    "ai": {"default_backend": "mock", "default_model_key": "flux2_klein_4b", "device": "cpu", "dtype": "float32", "steps": 1},
+                    "image2_executor": {"final_model_key": "flux2_klein_4b", "final_width": 128, "final_height": 128},
+                    "models": {"flux2_klein_4b": {"backend": "mock", "enabled": True, "reference_channels": ["rgb", "edge", "mask"]}},
+                },
+            )
+
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["import"]["source"], "local_model_image2_executor")
+            self.assertTrue(output.exists())
+            executor = read_manifest(request_path.with_name("local_model_image2_executor_report.json"))
+            self.assertEqual(executor["mode"], "final_render")
+            self.assertTrue(Path(executor["outputs"][0]["generation"]["ai_manifest"]).exists())
+
     def test_run_auto_scene_self_iteration_executes_pending_image2_then_continues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1177,6 +1293,9 @@ class AutoSceneTest(unittest.TestCase):
             report = read_manifest(root / "reports" / "self_iteration_report.json")
             self.assertEqual(report["cycle_count"], 2)
             self.assertEqual(report["cycles"][0]["image2_execution"]["status"], "complete")
+            self.assertTrue(report["live_results"])
+            self.assertTrue(report["live_results"][0]["path"].startswith("/"))
+            self.assertIn("![", report["live_results"][0]["codex_markdown"])
 
     def test_run_auto_scene_self_iteration_stops_on_repeated_image2_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

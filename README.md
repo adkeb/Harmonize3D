@@ -188,17 +188,17 @@ PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2
   --request outputs/auto_scene/demo_showroom/concept/imagegen_request.json
 ```
 
-For agent-driven runs, use the self-iteration wrapper. It runs Auto Scene, detects pending concept/module/final image2 requests, executes the configured image2 provider, imports the outputs, reruns the same workdir, and repeats through final position-retry requests until the reports settle or `--max-cycles` is reached. `filesystem_then_codex_latest` first accepts already-written `output_path` images, then scans `$CODEX_HOME/generated_images`. `command` runs `image2_executor.command` from config for each request item, which is the integration point for an internal image model service. `mock` is only for smoke tests and requires `--allow-mock-image2`.
+For agent-driven runs, use the self-iteration wrapper. It runs Auto Scene, detects pending concept/module/final image2 requests, executes the configured image2 provider, imports the outputs, reruns the same workdir, and repeats through final position-retry requests until the reports settle or `--max-cycles` is reached. If `--image2-provider` is omitted, the loop uses `image2_executor.provider` from config, which defaults to `local_model` in `configs/local.json`. `local_model` / `internal_image2` runs the configured internal image model from `image2_executor.*`: concept and module requests use prompt reference generation, while final and position-retry requests use the Blender white-model render channels and must still pass `white_model_position_lock`. `filesystem_then_codex_latest` first accepts already-written `output_path` images, then scans `$CODEX_HOME/generated_images`. `command` runs `image2_executor.command` from config for each request item, which is the integration point for a separate internal image model service. `mock` is only for smoke tests and requires `--allow-mock-image2`.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-self-iterate \
   --request "生成一个未来汽车发布会展台" \
   --output outputs/auto_scene/demo_showroom \
-  --image2-provider filesystem_then_codex_latest \
+  --image2-provider local_model \
   --max-cycles 8
 ```
 
-The loop writes `reports/self_iteration_report.json`. Codex built-in image2 is still a host tool rather than a normal Python library; when that host writes images to generated_images, the loop can import and validate them automatically, but direct in-process generation requires a configured `command` provider or another callable image model backend.
+The loop writes `reports/self_iteration_report.json` and a `live_results` list with absolute image paths plus Codex-ready Markdown image tags for the current concept, module sheet, white channels, final views, and comparison overlays. Codex built-in image2 is still a host tool rather than a normal Python library; when that host writes images to generated_images, the loop can import and validate them automatically, but direct in-process generation requires `local_model`, `command`, or another callable image model backend.
 
 For older runs that already have `renders/render_manifest.json` and `final/final_view_hero.png` but do not yet have the position retry artifacts, backfill the white-model position reports and retry handoff first:
 

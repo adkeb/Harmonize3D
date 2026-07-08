@@ -333,7 +333,7 @@ def cmd_auto_scene_self_iterate(args: argparse.Namespace) -> int:
                 render_backend=args.render_backend,
                 hero_model_path=Path(args.hero_model) if args.hero_model else None,
             ),
-            image2_provider=args.image2_provider,
+            image2_provider=args.image2_provider or config.get("image2_executor", {}).get("provider") or "filesystem_then_codex_latest",
             max_cycles=args.max_cycles,
             codex_home=Path(args.codex_home) if args.codex_home else None,
             after_timestamp=args.after_timestamp,
@@ -949,9 +949,9 @@ def build_parser() -> argparse.ArgumentParser:
     auto_scene_self.add_argument("--hero-model", help="Optional external GLB for the hero module; other modules still use the modular scene pipeline")
     auto_scene_self.add_argument(
         "--image2-provider",
-        default="filesystem_then_codex_latest",
-        choices=["filesystem_then_codex_latest", "filesystem", "codex_latest", "codex_generated_images", "command", "mock"],
-        help="Provider used by the self-iteration loop to satisfy pending image2 requests",
+        default=None,
+        choices=["filesystem_then_codex_latest", "filesystem", "codex_latest", "codex_generated_images", "command", "local_model", "internal_image2", "mock"],
+        help="Provider used by the self-iteration loop to satisfy pending image2 requests; defaults to image2_executor.provider",
     )
     auto_scene_self.add_argument("--max-cycles", type=int, default=8, help="Maximum self-iteration cycles before stopping")
     auto_scene_self.add_argument("--codex-home", help="Override CODEX_HOME when image2-provider scans generated_images")

@@ -105,6 +105,40 @@ class AutoSceneCliTest(unittest.TestCase):
             self.assertEqual(options.max_cycles, 4)
             self.assertTrue(options.allow_mock_image2)
 
+    def test_auto_scene_self_iterate_defaults_to_configured_image2_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.json"
+            write_manifest(config, {"paths": {"outputs_dir": str(root)}, "image2_executor": {"provider": "local_model"}})
+            with patch(
+                "local3dai.cli.run_auto_scene_self_iteration",
+                return_value={
+                    "status": "complete",
+                    "report": {"cycle_count": 1},
+                    "summary": {"status": "complete"},
+                },
+            ) as run_loop:
+                code, result = self._run_cli(
+                    [
+                        "--config",
+                        str(config),
+                        "auto-scene-self-iterate",
+                        "--request",
+                        "生成一个未来汽车发布会展台",
+                        "--output",
+                        str(root / "run"),
+                        "--backend",
+                        "mock",
+                        "--dry-run",
+                        "--no-llm",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(result["status"], "complete")
+            options = run_loop.call_args.args[0]
+            self.assertEqual(options.image2_provider, "local_model")
+
     def test_auto_scene_position_retry_imports_latest_then_reruns_same_workdir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
