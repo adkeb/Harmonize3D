@@ -11,20 +11,20 @@ Rendered PDF generated from the same DOCX: [`reports/论文.pdf`](reports/%E8%AE
 
 Paper title: **Harmonize3D：面向 3D 结构约束与多视图一致性的本地 AI 渲染 Agent**  
 Subtitle: **从单对象闭环到模块化全场景生成流程的阶段性研究**  
-Author metadata in the paper: 徐洋 / 20300290037 / 计算机科学与技术专业 / 指导教师：徐志平 / 2026 年 6 月
+Author metadata in the paper: 徐洋 / 20300290037 / 计算机科学与技术专业 / 指导教师：徐志平 / 2026 年 7 月
 
 Markdown mirrors generated from the latest DOCX:
 
 - [`docs/harmonize3d_paper.md`](docs/harmonize3d_paper.md)
 - [`reports/Harmonize3D_Paper_Deliverable.md`](reports/Harmonize3D_Paper_Deliverable.md)
 
-The paper has been updated with the June 18, 2026 Auto Scene run. This run validates the full modular chain:
+The paper has been updated with the July 8, 2026 Auto Scene self-iteration run. This run validates the full modular chain:
 
 ```text
 concept planning -> module references -> module 3D -> 3D scene assembly -> Blender white-model channels -> final AI render
 ```
 
-Current status is intentionally tracked through per-stage reports instead of a single unchecked success label. The June 18 run generated 5 Hunyuan3D 2.1 high-profile module GLBs with no procedural fallback and reached a module presence score of `0.855333`, a multiview score of `0.789947`, and a minimum structure review score of `0.551932`. The corrected Codex image2 retry path now preserves all final-render request views instead of only the hero request. `white_model_position_fit` remains a diagnostic preview only: it can write fitted copies under `final/position_fitted`, but it does not overwrite `final_view_*.png` and does not make a result complete. The white-model framing gate now blocks bad camera states before final image2: an earlier side view had bbox `[0.0, 0.251953, 1.0, 0.941406]` and reported `camera_retry_required`; the agent camera retry widened the selected Blender camera and regenerated the white-model channels. The current three-view workdir reports `white_model_position_contract.status=pass` and `framing_review.status=pass`, then accepted a Codex image2 final batch only after the original generated images passed strict `white_model_position_lock`. The accepted final batch has pass rate `1.0`, average total `0.819275`, and per-view totals `0.855849` (`view_hero`), `0.800278` (`view_left_30`), and `0.801699` (`view_right_30`). `final_position_retry_plan` now reports `not_needed` with reason `white_model_position_lock_passed`. Earlier image2 candidates that enlarged/recomposed the scene were rejected and fed back into the next prompts; successful imports now also refresh `contact_sheet.png`, `white_vs_final.png`, and `concept_vs_final.png` so paper assets cannot silently retain stale failed views.
+Current status is intentionally tracked through per-stage reports instead of a single unchecked success label. The July 8 run reports `auto_scene_summary.status=complete` and `self_iteration_report.status=complete` after one self-iteration cycle. It generated 5 Hunyuan3D 2.1 module GLBs with no procedural fallback, using the higher quality shape settings recorded in the module manifests (`steps=32`, `guidance_scale=5.0`, `octree_resolution=384`, `num_chunks=16000`). The module sanity report passes, and the lightweight module presence score is `0.855333`. The final render request uses the `codex_builtin_image2` handoff contract with planning images excluded from final inputs; every final view is locked to the Blender white-model RGB, edge, depth, normal, and mask channels. The current three-view workdir reports `white_model_position_contract.status=pass`, `framing_review.status=pass`, and strict `white_model_position_lock.status=pass`. The accepted final batch has pass rate `1.0`, average total `0.851523`, minimum total `0.821515`, and per-view totals `0.821515` (`view_hero`), `0.859023` (`view_left_30`), and `0.874030` (`view_right_30`). `final_position_retry_plan` reports `not_needed` with reason `white_model_position_lock_passed`. Earlier image2 candidates that enlarged or recomposed the scene remain rejected; successful imports refresh `contact_sheet.png`, `white_vs_final.png`, `concept_vs_final.png`, and the paper asset copies so README and DOCX figures cannot silently retain stale failed views.
 
 The latest paper image refresh fixes a stale-asset issue: the previous DOCX/PDF still embedded older failed final-render views with grey occlusion artifacts. Paper figures are now synchronized from the current Auto Scene workdir via `scripts/sync_paper_auto_scene_assets.py`, so `docs/paper_assets` and `reports/paper_assets` are both sourced from the same render manifest, original final images, and position-lock reports rather than manually cropped presentation images.
 

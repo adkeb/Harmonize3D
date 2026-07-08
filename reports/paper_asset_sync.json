@@ -1,10 +1,13 @@
 {
   "type": "paper_auto_scene_asset_sync",
-  "workdir": "/root/sakura/work/Harmonize3D/outputs/auto_scene/full_current_concept_source_v1",
+  "workdir": "/root/sakura/work/Harmonize3D/outputs/auto_scene/internal_full_showroom_v1",
   "destinations": [
     {
       "path": "/root/sakura/work/Harmonize3D/docs/paper_assets",
       "assets": {
+        "module_references_contact": "docs/paper_assets/module_references_contact.png",
+        "scene_preview": "docs/paper_assets/scene_preview.png",
+        "render_channels_view_hero": "docs/paper_assets/render_channels_view_hero.png",
         "final_contact_sheet": "docs/paper_assets/final_contact_sheet.png",
         "white_vs_final": "docs/paper_assets/white_vs_final.png",
         "concept_vs_final": "docs/paper_assets/concept_vs_final.png",
@@ -16,6 +19,9 @@
     {
       "path": "/root/sakura/work/Harmonize3D/reports/paper_assets",
       "assets": {
+        "module_references_contact": "reports/paper_assets/module_references_contact.png",
+        "scene_preview": "reports/paper_assets/scene_preview.png",
+        "render_channels_view_hero": "reports/paper_assets/render_channels_view_hero.png",
         "final_contact_sheet": "reports/paper_assets/final_contact_sheet.png",
         "white_vs_final": "reports/paper_assets/white_vs_final.png",
         "concept_vs_final": "reports/paper_assets/concept_vs_final.png",

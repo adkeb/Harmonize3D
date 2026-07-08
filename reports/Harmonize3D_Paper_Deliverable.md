@@ -6,15 +6,13 @@
 学号：20300290037  
 专业：计算机科学与技术专业  
 指导教师：徐志平  
-完成时间：2026 年 6 月
-
-> 本 Markdown 由 `reports/论文.docx` 同步生成；`reports/论文.docx` 是当前最新权威版本。
+完成时间：2026 年 7 月
 
 ## 摘要
 
 生成式图像模型能够快速产生高质量视觉概念，但在面向产品渲染、汽车展示、游戏资产预览和复杂场景设计等 3D 内容生产任务时，仍然存在结构漂移、视角不一致、过程不可审计和人工调参成本高等问题。本文提出并总结 Harmonize3D 的阶段性系统：一个本地运行的 3D 结构约束 AI 渲染 Agent。系统不把图像模型视为一次性自由生成器，而是先构建或导入真实 3D 白模，再通过相机状态、Blender 结构通道和 render manifest 建立可追踪的数据契约，最后由 AI 图像模型在模型派生通道的约束下完成视觉渲染。
 
-本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 6 月 18 日运行已经不再停留在 mock/procedural 资产；经过失败候选反馈、相机 framing 复核和 Codex image2 位置重试后，当前三视角最终图已经按 Blender 白模通道完成渲染，并通过严格 `white_model_position_lock`。系统将 `white_model_position_fit` 保持为诊断预览，只允许原始 image2 成图通过位置锁后进入成品。
+本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 7 月 8 日完整内部运行已经不再停留在 mock/procedural 资产；Agent 通过 image2 生成概念图与正视模块参考图，再调用高质量 Hunyuan3D 2.1 参数生成模块 GLB，随后装配 3D 场景并用 Blender 白模通道约束最终 image2 渲染。当前三视角最终图已经按 Blender 白模通道完成渲染，并通过严格 `white_model_position_lock`。系统将 `white_model_position_fit` 保持为诊断预览，只允许原始 image2 成图通过位置锁后进入成品。
 
 需要明确的是，Harmonize3D 当前并非工业级渲染器，也不是已完成大规模训练或充分评测的全场景生成模型。本文的贡献在于提出一种模型外部的、轻量可审计的 3D-grounded rendering 流程：以真实 3D 模型和结构通道作为最终渲染的权威约束，以 Agent 负责任务规划、工具执行、候选筛选与失败复核，从而把“漂亮但不可控”的图像生成推进为“结构可追踪、视角可复现、结果可检查”的 3D AI 渲染工作流。
 
@@ -181,7 +179,7 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 *图 10  最新 Auto Scene 模块参考图，用于后续模块级 image-to-3D。*
 
-全场景阶段最重要的变化是模块化。主车是 hero object，展示台提供空间支撑，竖向屏幕和蓝色灯带提供背景氛围，机械臂作为配角增强发布会语义。最新运行拆分为 5 个核心模块，全部调用 Hunyuan3D 2.1 shape high profile 生成 GLB，没有使用 procedural fallback。模块级评分总分为 0.855333，5 个模块均通过轻量布局评分，但屏幕类模块的几何厚度、比例和遮挡仍暴露出简单 sanity check 不足的问题。
+全场景阶段最重要的变化是模块化。主车是 hero object，展示台提供空间支撑，竖向屏幕和蓝色灯带提供背景氛围，机械臂作为配角增强发布会语义。最新运行拆分为 5 个核心模块，全部调用 Hunyuan3D 2.1 shape 高质量配置生成 GLB，没有使用 procedural fallback；模块 manifest 记录的生成参数为 `steps=32`、`guidance_scale=5.0`、`octree_resolution=384`、`num_chunks=16000`。模块级评分总分为 0.855333，5 个模块均通过轻量布局评分，但屏幕类模块的几何厚度、比例和遮挡仍暴露出简单 sanity check 不足的问题。
 
 图 11 是最新全场景结构预览，用于检查模块布局、主体覆盖范围和相机下的空间关系。图 12 展示了同一 hero view 派生出的 RGB、Edge、Mask、Depth、Normal 通道。可以看到，全场景阶段仍沿用单对象阶段的核心原则：最终 AI 渲染应当基于完整场景结构通道，而不是直接把概念图或模块参考图喂给最终成图模型。
 
@@ -205,7 +203,7 @@ MeshLock 并不是一个训练出来的新网络，而是一种轻量系统机�
 
 图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -> 模块参考 -> 模块 3D -> 3D 场景组装 -> Blender 白模通道 -> 最终 AI 渲染”，并且最终图已经由当前 workdir、render manifest 和位置锁定报告可复现地生成，而不是依赖人工复制的旧文件。
 
-在当前三视角工作目录中，原始 Codex image2 成品图的 `white_model_position_lock` 已经通过，pass rate 为 `1.0`，平均 total 为 `0.819275`。其中 `view_hero` 的 total 为 `0.855849`，`view_left_30` 为 `0.800278`，`view_right_30` 为 `0.801699`；三视角失败原因均为空。`final_position_retry_plan` 因此返回 `not_needed`，原因是 `white_model_position_lock_passed`。这说明最终图已经按 Blender 白模位置完成渲染，可以作为当前 Agent 流程的合格成品进入论文与 README 展示；同时，`concept_final_comparison` 仍可继续标记概念语义层面的差异，用于后续改善概念图到模块拆解、模块 3D 和场景搭建环节。
+在当前三视角工作目录中，原始 image2 成品图的 `white_model_position_lock` 已经通过，pass rate 为 `1.0`，平均 total 为 `0.851523`，最低 total 为 `0.821515`。其中 `view_hero` 的 total 为 `0.821515`，`view_left_30` 为 `0.859023`，`view_right_30` 为 `0.874030`；三视角失败原因均为空。`final_position_retry_plan` 因此返回 `not_needed`，原因是 `white_model_position_lock_passed`。这说明最终图已经按 Blender 白模位置完成渲染，可以作为当前 Agent 流程的合格成品进入论文与 README 展示；同时，`concept_final_comparison.status=pass` 仍可继续标记概念语义层面的差异，用于后续改善概念图到模块拆解、模块 3D 和场景搭建环节。
 
 ![concept_vs_final.png](paper_assets/concept_vs_final.png)
 
@@ -241,7 +239,7 @@ MeshLock 并非新模型，而是对生成流程的外部约束策略。它承�
 
 • 相机搜索目前更偏向通用结构分，尚未充分把概念图构图、主车正面可见性和关键模块无遮挡作为硬约束。
 
-• 最终 AI 渲染仍可能偏离白模位置或弱化主车主体，下一步需要把 Codex image2/图像渲染后端的提示词约束、白模通道和概念对比闭环结合起来。
+• 本轮最终 AI 渲染已经通过白模位置锁，但视觉质量、材质细节和概念语义一致性仍受中间 3D 模块质量影响；下一步需要继续把 image2 提示词约束、白模通道、概念对比和模块级几何 sanity check 结合起来。
 
 • 评分器仍以轻量 CV 指标为主，尚未充分引入 VLM 语义判断、人工标注基准和系统化失败分类。
 

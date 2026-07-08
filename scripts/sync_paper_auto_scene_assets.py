@@ -38,6 +38,9 @@ def _sync_one_destination(workdir: Path, destination: Path) -> dict[str, str]:
     white_hero = _render_manifest_rgb(workdir, "view_hero")
     final_dir = workdir / "final"
     sources = {
+        "module_references_contact": final_dir / "module_references_contact_sheet.png",
+        "scene_preview": white_hero,
+        "render_channels_view_hero": final_dir / "white_channels_contact_sheet.png",
         "final_contact_sheet": final_dir / "contact_sheet.png",
         "white_vs_final": final_dir / "white_vs_final.png",
         "concept_vs_final": final_dir / "concept_vs_final.png",

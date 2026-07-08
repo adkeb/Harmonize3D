@@ -62,11 +62,10 @@ figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; 
 <p>学号：20300290037</p>
 <p>专业：计算机科学与技术专业</p>
 <p>指导教师：徐志平</p>
-<p>完成时间：2026 年 6 月</p>
-<p>&gt; 本 Markdown 由 <code>reports/论文.docx</code> 同步生成；<code>reports/论文.docx</code> 是当前最新权威版本。</p>
+<p>完成时间：2026 年 7 月</p>
 <h2 id="摘要">摘要</h2>
 <p>生成式图像模型能够快速产生高质量视觉概念，但在面向产品渲染、汽车展示、游戏资产预览和复杂场景设计等 3D 内容生产任务时，仍然存在结构漂移、视角不一致、过程不可审计和人工调参成本高等问题。本文提出并总结 Harmonize3D 的阶段性系统：一个本地运行的 3D 结构约束 AI 渲染 Agent。系统不把图像模型视为一次性自由生成器，而是先构建或导入真实 3D 白模，再通过相机状态、Blender 结构通道和 render manifest 建立可追踪的数据契约，最后由 AI 图像模型在模型派生通道的约束下完成视觉渲染。</p>
-<p>本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 6 月 18 日运行已经不再停留在 mock/procedural 资产；经过失败候选反馈、相机 framing 复核和 Codex image2 位置重试后，当前三视角最终图已经按 Blender 白模通道完成渲染，并通过严格 <code>white_model_position_lock</code>。系统将 <code>white_model_position_fit</code> 保持为诊断预览，只允许原始 image2 成图通过位置锁后进入成品。</p>
+<p>本文重构了项目从单对象到全场景的研究路线。首先，单图/单模型闭环已经完成：输入图经过预处理后生成 Hunyuan3D 白模，Web 工作台支持真实 3D 预览和相机锁定，Blender 输出 RGB、Edge、Mask、Depth、Normal 等通道，最终 AI 渲染只读取模型派生通道并生成产品级结果。其次，单模型多视图与 MeshLock 实验证明，单纯图像模型或直接 ControlNet 输出仍会出现结构不稳定，而外部 3D 结构通道、候选搜索和一致性评分能够显著改善多视角结构遵从。最后，当前版本进一步扩展到 Auto Scene Agent：系统从一句“未来汽车发布会展台”的自然语言请求出发，完成需求扩写、概念图生成、模块参考图生成、模块级 image-to-3D、3D 场景装配、Blender 白模通道、三视角 AI 渲染和自动复核。最新一次 2026 年 7 月 8 日完整内部运行已经不再停留在 mock/procedural 资产；Agent 通过 image2 生成概念图与正视模块参考图，再调用高质量 Hunyuan3D 2.1 参数生成模块 GLB，随后装配 3D 场景并用 Blender 白模通道约束最终 image2 渲染。当前三视角最终图已经按 Blender 白模通道完成渲染，并通过严格 <code>white_model_position_lock</code>。系统将 <code>white_model_position_fit</code> 保持为诊断预览，只允许原始 image2 成图通过位置锁后进入成品。</p>
 <p>需要明确的是，Harmonize3D 当前并非工业级渲染器，也不是已完成大规模训练或充分评测的全场景生成模型。本文的贡献在于提出一种模型外部的、轻量可审计的 3D-grounded rendering 流程：以真实 3D 模型和结构通道作为最终渲染的权威约束，以 Agent 负责任务规划、工具执行、候选筛选与失败复核，从而把“漂亮但不可控”的图像生成推进为“结构可追踪、视角可复现、结果可检查”的 3D AI 渲染工作流。</p>
 <p>关键词：Harmonize3D；3D 生成；结构通道；多视图一致性；MeshLock；AI Agent；场景生成</p>
 <h2 id="1.-引言">1. 引言</h2>
@@ -154,7 +153,7 @@ figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; 
 <p>最新 Auto Scene 流程首先由 qwen3.7-plus Planner 生成结构化 scene_plan，再根据总体概念图生成独立模块参考图。图 10 展示了本次运行中用于 3D AI 的模块参考图：白色电动超跑、黑色展示台、左/右竖向科技屏幕和工业机械臂。参考图强调单一主体、正视图或清晰轮廓，目的是让后续 image-to-3D 更容易恢复干净几何。</p>
 <figure><img src="paper_assets/module_references_contact.png" alt="module_references_contact.png"></figure>
 <p class="caption">图 10  最新 Auto Scene 模块参考图，用于后续模块级 image-to-3D。</p>
-<p>全场景阶段最重要的变化是模块化。主车是 hero object，展示台提供空间支撑，竖向屏幕和蓝色灯带提供背景氛围，机械臂作为配角增强发布会语义。最新运行拆分为 5 个核心模块，全部调用 Hunyuan3D 2.1 shape high profile 生成 GLB，没有使用 procedural fallback。模块级评分总分为 0.855333，5 个模块均通过轻量布局评分，但屏幕类模块的几何厚度、比例和遮挡仍暴露出简单 sanity check 不足的问题。</p>
+<p>全场景阶段最重要的变化是模块化。主车是 hero object，展示台提供空间支撑，竖向屏幕和蓝色灯带提供背景氛围，机械臂作为配角增强发布会语义。最新运行拆分为 5 个核心模块，全部调用 Hunyuan3D 2.1 shape 高质量配置生成 GLB，没有使用 procedural fallback；模块 manifest 记录的生成参数为 <code>steps=32</code>、<code>guidance_scale=5.0</code>、<code>octree_resolution=384</code>、<code>num_chunks=16000</code>。模块级评分总分为 0.855333，5 个模块均通过轻量布局评分，但屏幕类模块的几何厚度、比例和遮挡仍暴露出简单 sanity check 不足的问题。</p>
 <p>图 11 是最新全场景结构预览，用于检查模块布局、主体覆盖范围和相机下的空间关系。图 12 展示了同一 hero view 派生出的 RGB、Edge、Mask、Depth、Normal 通道。可以看到，全场景阶段仍沿用单对象阶段的核心原则：最终 AI 渲染应当基于完整场景结构通道，而不是直接把概念图或模块参考图喂给最终成图模型。</p>
 <figure><img src="paper_assets/scene_preview.png" alt="scene_preview.png"></figure>
 <p class="caption">图 11  最新 Auto Scene 结构预览。</p>
@@ -166,7 +165,7 @@ figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; 
 <figure><img src="paper_assets/white_vs_final.png" alt="white_vs_final.png"></figure>
 <p class="caption">图 14  最新白模参考与原始最终 AI 渲染对照。</p>
 <p>图 15 是当前复盘结果的关键对比，直接把概念图、Blender 白模通道和最终图放在同一行。它说明全场景流程已经打通“概念规划 -&gt; 模块参考 -&gt; 模块 3D -&gt; 3D 场景组装 -&gt; Blender 白模通道 -&gt; 最终 AI 渲染”，并且最终图已经由当前 workdir、render manifest 和位置锁定报告可复现地生成，而不是依赖人工复制的旧文件。</p>
-<p>在当前三视角工作目录中，原始 Codex image2 成品图的 <code>white_model_position_lock</code> 已经通过，pass rate 为 <code>1.0</code>，平均 total 为 <code>0.819275</code>。其中 <code>view_hero</code> 的 total 为 <code>0.855849</code>，<code>view_left_30</code> 为 <code>0.800278</code>，<code>view_right_30</code> 为 <code>0.801699</code>；三视角失败原因均为空。<code>final_position_retry_plan</code> 因此返回 <code>not_needed</code>，原因是 <code>white_model_position_lock_passed</code>。这说明最终图已经按 Blender 白模位置完成渲染，可以作为当前 Agent 流程的合格成品进入论文与 README 展示；同时，<code>concept_final_comparison</code> 仍可继续标记概念语义层面的差异，用于后续改善概念图到模块拆解、模块 3D 和场景搭建环节。</p>
+<p>在当前三视角工作目录中，原始 image2 成品图的 <code>white_model_position_lock</code> 已经通过，pass rate 为 <code>1.0</code>，平均 total 为 <code>0.851523</code>，最低 total 为 <code>0.821515</code>。其中 <code>view_hero</code> 的 total 为 <code>0.821515</code>，<code>view_left_30</code> 为 <code>0.859023</code>，<code>view_right_30</code> 为 <code>0.874030</code>；三视角失败原因均为空。<code>final_position_retry_plan</code> 因此返回 <code>not_needed</code>，原因是 <code>white_model_position_lock_passed</code>。这说明最终图已经按 Blender 白模位置完成渲染，可以作为当前 Agent 流程的合格成品进入论文与 README 展示；同时，<code>concept_final_comparison.status=pass</code> 仍可继续标记概念语义层面的差异，用于后续改善概念图到模块拆解、模块 3D 和场景搭建环节。</p>
 <figure><img src="paper_assets/concept_vs_final.png" alt="concept_vs_final.png"></figure>
 <p class="caption">图 15  最新复盘结果：概念图、白模通道与原始最终图对比。</p>
 <figure><img src="paper_assets/white_model_view_hero.png" alt="white_model_view_hero.png"></figure>
@@ -184,7 +183,7 @@ figcaption, .caption { color: var(--muted); font-size: 12.5px; margin-top: 6px; 
 <h2 id="10.-局限性">10. 局限性</h2>
 <p>• 屏幕、展台等规则几何模块虽然能通过基础 sanity check，但 3D AI 生成结果可能出现厚度、比例和遮挡异常，需要增加面向平板/展台类资产的语义几何检查。</p>
 <p>• 相机搜索目前更偏向通用结构分，尚未充分把概念图构图、主车正面可见性和关键模块无遮挡作为硬约束。</p>
-<p>• 最终 AI 渲染仍可能偏离白模位置或弱化主车主体，下一步需要把 Codex image2/图像渲染后端的提示词约束、白模通道和概念对比闭环结合起来。</p>
+<p>• 本轮最终 AI 渲染已经通过白模位置锁，但视觉质量、材质细节和概念语义一致性仍受中间 3D 模块质量影响；下一步需要继续把 image2 提示词约束、白模通道、概念对比和模块级几何 sanity check 结合起来。</p>
 <p>• 评分器仍以轻量 CV 指标为主，尚未充分引入 VLM 语义判断、人工标注基准和系统化失败分类。</p>
 <p>• 当前案例集中在汽车展示场景，尚不能证明对任意产品、角色、建筑或室内任务都具备同等稳定性。</p>
 <p>• 多视图一致性仍处于三视图 MVP 层面，尚未实现基于 face_id、visibility buffer 或 appearance memory 的严格跨视角表面对应。</p>
