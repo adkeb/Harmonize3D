@@ -15,6 +15,7 @@ from local3dai.auto_scene import (
     SceneToolExecutor,
     _binary_bbox,
     _camera_plan_for_framing_retry,
+    _concept_prompt_with_positive_constraints,
     _extract_concept_camera_target,
     _mask_from_channel,
     _module_reference_prompt_with_safety,
@@ -92,6 +93,22 @@ class AutoSceneTest(unittest.TestCase):
         self.assertEqual(concept["output"], "concept/global_concept.png")
         self.assertIn("planning", concept["purpose"])
         self.assertNotIn("negative_prompt", concept)
+
+    def test_concept_prompt_revision_uses_positive_constraints(self) -> None:
+        prompt = _concept_prompt_with_positive_constraints(
+            "white hypercar with a completely smooth front hood (absolutely no badges, logos, or emblems allowed on the nose, ensure the gold shield logo is removed) and clean wheels, "
+            "screens displaying circuit patterns without any readable text or logos, "
+            "a robotic arm visible on the right side (ensure arm segments have absolutely no text labels, brand names, logos, or warning stickers, remove the small logo), "
+            "strictly no people, absolutely no exit signs, safety signage, or red lights on walls"
+        )
+        self.assertIn("smooth unbranded front hood", prompt)
+        self.assertIn("abstract graphic patterns", prompt)
+        self.assertIn("blank unbranded smooth metal robotic arm", prompt)
+        self.assertIn("empty showroom", prompt)
+        for token in ("absolutely no", "without", "remove", "strictly no", "free of"):
+            self.assertNotIn(token, prompt.lower())
+        for visual_token in ("logo", "emblem", "text labels", "warning stickers"):
+            self.assertNotIn(visual_token, prompt.lower())
 
     def test_module_plan_contains_prompts_roles_sizes_and_placement(self) -> None:
         plan, _ = call_model_scene_planner({}, self._options())
@@ -406,6 +423,11 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("toy-like educational robot arm", side_profile)
             self.assertIn("five smooth cylinders connected by circular hinge disks only", side_profile)
             self.assertIn("made only from smooth cylinders", side_profile)
+            self.assertIn("wide left-right frontal silhouette", side_profile)
+            self.assertIn("base centered at bottom", side_profile)
+            self.assertIn("lower arm link angled up-left", side_profile)
+            self.assertIn("upper arm link angled up-right", side_profile)
+            self.assertIn("wrist and two-finger gripper visible near top center", side_profile)
             self.assertIn("sealed-joint design", side_profile)
             self.assertIn("smooth uninterrupted exterior", side_profile)
             self.assertNotIn("black corrugated", side_profile)
@@ -436,6 +458,15 @@ class AutoSceneTest(unittest.TestCase):
             )
             self.assertNotIn(", not,", revised_with_negative_views)
             self.assertNotRegex(revised_with_negative_views, r"(?:^|, )not(?:,|$)")
+            revised_negative_content = _module_reference_prompt_with_safety(
+                {"module_id": "industrial_robotic_arm", "name": "industrial robotic arm"},
+                "robot arm, absolutely no text labels, without visible cables, not side profile",
+            )
+            self.assertIn("blank unlabeled surfaces", revised_negative_content)
+            self.assertIn("cableless sealed body with internally hidden wiring", revised_negative_content)
+            self.assertIn("front elevation", revised_negative_content)
+            self.assertNotIn("absolutely no", revised_negative_content.lower())
+            self.assertNotIn("without", revised_negative_content.lower())
             self.assertNotIn("ABB", side_profile)
             self.assertNotIn("KUKA", side_profile)
 
@@ -1172,6 +1203,68 @@ class AutoSceneTest(unittest.TestCase):
             executor = read_manifest(request_path.with_name("local_model_image2_executor_report.json"))
             self.assertEqual(executor["provider"], "local_model")
             self.assertEqual(executor["mode"], "reference_image")
+            request = read_manifest(request_path)
+            self.assertEqual(request["fulfilled_by_provider"], "local_model")
+            self.assertEqual(request["fulfilled_by_source"], "local_model_image2_executor")
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            generate_concept_image(
+                root,
+                {"output": "concept/global_concept.png", "concept_prompt": "compact futuristic showroom concept"},
+                config={"reference_generation": {"provider": "external_imagegen"}},
+                options=options,
+            )
+            manifest = read_manifest(output.with_name("generation_manifest.json"))
+            self.assertEqual(manifest["image_source"], "local_model_image2")
+            self.assertEqual(manifest["created_by"], "local_model_image2_reference_generation")
+            self.assertEqual(manifest["executor_provider"], "local_model")
+
+    def test_local_model_image2_regeneration_increments_attempt_and_backs_up_previous_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "concept" / "global_concept.png"
+            request_path = write_manifest(
+                root / "concept" / "imagegen_request.json",
+                {
+                    "type": "external_imagegen_request",
+                    "status": "awaiting_external_imagegen",
+                    "provider": "codex_builtin_image2",
+                    "kind": "concept",
+                    "output_path": str(output),
+                    "prompt": "compact futuristic showroom concept",
+                },
+            )
+            seeds: list[int] = []
+
+            def fake_reference(**kwargs: object) -> dict[str, object]:
+                seeds.append(int(kwargs["seed"]))
+                target = Path(kwargs["output"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (32, 32), (seeds[-1] % 255, 90, 180)).save(target)
+                return {
+                    "path": str(target),
+                    "created_by": "image2_model_reference_generation",
+                    "model_key": kwargs["model_key"],
+                    "backend": "flux2-klein",
+                    "prompt": kwargs["prompt"],
+                }
+
+            config = {
+                "reference_generation": {"default_model_key": "flux2_klein_4b"},
+                "image2_executor": {"reference_model_key": "flux2_klein_4b", "seed": 7},
+                "models": {"flux2_klein_4b": {"backend": "flux2-klein", "enabled": True}},
+                "ai": {"default_model_key": "flux2_klein_4b"},
+            }
+            with patch("local3dai.auto_scene._generate_prompt_reference_image", side_effect=fake_reference):
+                first = execute_auto_scene_image2_request(request_path, provider="local_model", config=config)
+                second = execute_auto_scene_image2_request(request_path, provider="local_model", config=config)
+
+            self.assertEqual(first["executor_report"]["attempt"], 1)
+            self.assertEqual(second["executor_report"]["attempt"], 2)
+            self.assertNotEqual(seeds[0], seeds[1])
+            previous_output = second["executor_report"]["outputs"][0]["previous_output"]
+            self.assertTrue(Path(previous_output).exists())
 
     def test_execute_auto_scene_image2_request_local_model_generates_final_from_render_channels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1886,6 +1979,69 @@ class AutoSceneTest(unittest.TestCase):
             self.assertIn("White-model position contract", handoff_text)
             self.assertIn("view_hero=/path/to/codex-image2-output-1.png", handoff_text)
             self.assertIn("auto-scene-import-latest-image2", handoff_text)
+
+    def test_codex_image2_final_render_reuses_fulfilled_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            concept = root / "concept" / "global_concept.png"
+            concept.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (40, 80, 160)).save(concept)
+            view_dir = root / "renders" / "view_hero"
+            view_dir.mkdir(parents=True)
+            files = {}
+            for channel in ("rgb", "edge", "depth", "normal", "mask"):
+                path = view_dir / f"{channel}.png"
+                image = Image.new("RGB", (64, 64), (42, 44, 48))
+                ImageDraw.Draw(image).rectangle((14, 20, 52, 48), fill=(210, 210, 210), outline=(120, 160, 220), width=1)
+                image.save(path)
+                files[channel] = str(path)
+            render_manifest = write_manifest(
+                root / "renders" / "render_manifest.json",
+                {"views": [{"view_id": "view_hero", "files": files}]},
+            )
+            contract = create_white_model_position_contract(
+                render_manifest=render_manifest,
+                output_report=root / "reports" / "white_model_position_contract.json",
+                output_image=root / "final" / "white_position_contract_overlay.png",
+                output_views=1,
+            )
+            final_image = root / "final" / "final_view_hero.png"
+            Image.new("RGB", (64, 64), (230, 230, 236)).save(final_image)
+            request_path = write_manifest(
+                root / "final" / "codex_image2_final_request.json",
+                {
+                    "type": "codex_image2_final_render_request",
+                    "kind": "final_render_batch",
+                    "status": "fulfilled_by_codex_image2",
+                    "provider": "codex_builtin_image2",
+                    "render_manifest": str(render_manifest),
+                    "white_model_position_contract": str(root / "reports" / "white_model_position_contract.json"),
+                    "request_count": 1,
+                    "requests": [
+                        {
+                            "view_id": "view_hero",
+                            "source_render_view_id": "view_hero",
+                            "kind": "final_render",
+                            "output_path": str(final_image),
+                            "prompt": "already fulfilled render",
+                            "input_images": [{"role": "white_model_rgb_position_lock", "path": files["rgb"], "channel": "rgb"}],
+                            "position_lock_contract": contract["contracts"][0],
+                        }
+                    ],
+                },
+            )
+
+            summary = generate_codex_image2_final_render(
+                workdir=root,
+                render_manifest_path=render_manifest,
+                prompt_plan={"render_prompt": "premium final showroom render"},
+                concept_image=concept,
+                output_views=1,
+                position_contract_path=root / "reports" / "white_model_position_contract.json",
+            )
+
+            self.assertEqual(summary["final_image"], str(final_image.resolve()))
+            self.assertEqual(read_manifest(request_path)["status"], "fulfilled_by_codex_image2")
 
     def test_blender_render_backend_writes_auto_scene_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3065,6 +3221,206 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(seen_overrides["steps"], 40)
             self.assertEqual(seen_overrides["octree_resolution"], 512)
 
+    def test_module_assets_retry_hunyuan_profiles_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "modules" / "hero_car" / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (240, 240, 240)).save(reference)
+            module = {
+                "module_id": "hero_car",
+                "name": "hero car",
+                "role": "supporting_object",
+                "category": "vehicle",
+                "generate_3d": True,
+                "expected_real_world_size": {"width": 2.0, "depth": 4.8, "height": 1.2, "unit": "meters"},
+            }
+            attempts: list[int] = []
+
+            def fake_hunyuan_shape(**kwargs: object) -> Path:
+                from local3dai.auto_scene import write_module_proxy_glb
+
+                overrides = dict(kwargs.get("shape_overrides") or {})
+                attempts.append(int(overrides.get("steps", 0)))
+                if int(overrides.get("steps", 0)) == 56:
+                    raise RuntimeError("simulated high profile OOM")
+                output_model = Path(kwargs["output_model"])
+                write_module_proxy_glb(output_model, module)
+                write_manifest(Path(kwargs["metadata"]), {"backend": "fake_hunyuan", "mesh_sanity": {"status": "pass", "flags": []}})
+                return output_model
+
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            config = {
+                "system": {"python": ".venv/bin/python"},
+                "models": {
+                    "hunyuan3d_2_1_shape": {
+                        "enabled": True,
+                        "auto_scene_profile": "high",
+                        "memory_safe_profile_under_gb": 0,
+                        "profiles": {
+                            "high": {"steps": 56, "guidance_scale": 5.0, "octree_resolution": 512, "num_chunks": 32000},
+                            "stable": {"steps": 32, "guidance_scale": 5.0, "octree_resolution": 384, "num_chunks": 16000},
+                        },
+                    }
+                },
+            }
+            with patch("local3dai.workflow._run_hunyuan_shape", side_effect=fake_hunyuan_shape):
+                assets = generate_module_assets(root, {"modules": [module]}, allow_fallback=True, config=config, options=options)
+            asset = assets["modules"][0]
+            self.assertEqual(attempts, [56, 32])
+            self.assertEqual(asset["sanity"]["proxy_geometry"], "hunyuan3d_2_1_shape_from_reviewed_reference")
+            self.assertEqual(asset["sanity"]["hunyuan_profile"], "stable")
+            self.assertEqual(asset["sanity"]["hunyuan_attempts"][0]["status"], "failed")
+            self.assertEqual(asset["sanity"]["hunyuan_attempts"][1]["status"], "complete")
+
+    def test_module_assets_reuse_existing_hunyuan_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module = {
+                "module_id": "hero_car",
+                "name": "hero car",
+                "role": "supporting_object",
+                "category": "vehicle",
+                "generate_3d": True,
+                "expected_real_world_size": {"width": 2.0, "depth": 4.8, "height": 1.2, "unit": "meters"},
+            }
+            module_dir = root / "modules" / "hero_car"
+            reference = module_dir / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (240, 240, 240)).save(reference)
+            write_manifest(
+                module_dir / "reference_manifest.json",
+                {"module_id": "hero_car", "reference_image": str(reference), "review_status": "pass"},
+            )
+            from local3dai.auto_scene import write_module_proxy_glb
+
+            model_path = module_dir / "model.glb"
+            write_module_proxy_glb(model_path, module)
+            metadata_path = write_manifest(
+                module_dir / "metadata.json",
+                {
+                    "module_id": "hero_car",
+                    "created_by": "hunyuan3d_2_1_shape_from_reviewed_reference",
+                    "model_path": str(model_path.resolve()),
+                    "source_reference": str(reference.resolve()),
+                    "hunyuan_profile": "stable",
+                },
+            )
+            sanity = {
+                "vertices": 8,
+                "faces": 12,
+                "status": "pass",
+                "fallback_used": False,
+                "proxy_geometry": "hunyuan3d_2_1_shape_from_reviewed_reference",
+            }
+            write_manifest(module_dir / "sanity.json", sanity)
+            write_manifest(
+                root / "modules" / "module_asset_manifest.json",
+                {
+                    "modules": [
+                        {
+                            "module_id": "hero_car",
+                            "reference_image": str(reference.resolve()),
+                            "preprocessed_image": str(module_dir / "preprocessed.png"),
+                            "model_path": str(model_path.resolve()),
+                            "metadata": str(metadata_path.resolve()),
+                            "sanity": sanity,
+                            "bbox": {"width": 2.0, "depth": 4.8, "height": 1.2},
+                            "role": "supporting_object",
+                            "fallback_used": False,
+                        }
+                    ],
+                    "allow_procedural_fallback": True,
+                    "module_3d_backend": "hunyuan3d_2_1_shape",
+                    "failed_modules": [],
+                    "quality_issues": [],
+                    "status": "pass",
+                },
+            )
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            config = {"models": {"hunyuan3d_2_1_shape": {"enabled": True, "profiles": {"stable": {"steps": 32}}}}}
+            with patch("local3dai.workflow._run_hunyuan_shape", side_effect=AssertionError("must reuse existing module asset")):
+                assets = generate_module_assets(root, {"modules": [module]}, allow_fallback=True, config=config, options=options)
+
+            self.assertTrue(assets["reused_existing_assets"])
+            self.assertEqual(assets["modules"][0]["module_id"], "hero_car")
+            self.assertEqual(assets["modules"][0]["sanity"]["status"], "pass")
+
+    def test_module_assets_regenerate_when_reference_is_newer_than_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module = {
+                "module_id": "hero_car",
+                "name": "hero car",
+                "role": "supporting_object",
+                "category": "vehicle",
+                "generate_3d": True,
+                "expected_real_world_size": {"width": 2.0, "depth": 4.8, "height": 1.2, "unit": "meters"},
+            }
+            module_dir = root / "modules" / "hero_car"
+            reference = module_dir / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (240, 240, 240)).save(reference)
+            write_manifest(module_dir / "reference_manifest.json", {"module_id": "hero_car", "reference_image": str(reference), "review_status": "pass"})
+            from local3dai.auto_scene import write_module_proxy_glb
+
+            model_path = module_dir / "model.glb"
+            write_module_proxy_glb(model_path, module)
+            old_time = 1000.0
+            os.utime(model_path, (old_time, old_time))
+            os.utime(reference, (old_time + 10.0, old_time + 10.0))
+            metadata_path = write_manifest(
+                module_dir / "metadata.json",
+                {
+                    "module_id": "hero_car",
+                    "created_by": "hunyuan3d_2_1_shape_from_reviewed_reference",
+                    "model_path": str(model_path.resolve()),
+                    "source_reference": str(reference.resolve()),
+                },
+            )
+            sanity = {"vertices": 8, "faces": 12, "status": "pass", "fallback_used": False, "proxy_geometry": "hunyuan3d_2_1_shape_from_reviewed_reference"}
+            write_manifest(module_dir / "sanity.json", sanity)
+            write_manifest(
+                root / "modules" / "module_asset_manifest.json",
+                {
+                    "modules": [
+                        {
+                            "module_id": "hero_car",
+                            "reference_image": str(reference.resolve()),
+                            "model_path": str(model_path.resolve()),
+                            "metadata": str(metadata_path.resolve()),
+                            "sanity": sanity,
+                            "fallback_used": False,
+                        }
+                    ],
+                    "failed_modules": [],
+                    "quality_issues": [],
+                    "status": "pass",
+                },
+            )
+            calls = {"count": 0}
+
+            def fake_hunyuan_shape(**kwargs: object) -> Path:
+                calls["count"] += 1
+                output_model = Path(kwargs["output_model"])
+                write_module_proxy_glb(output_model, module)
+                write_manifest(Path(kwargs["metadata"]), {"backend": "fake_hunyuan", "mesh_sanity": {"status": "pass", "flags": []}})
+                return output_model
+
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            config = {"models": {"hunyuan3d_2_1_shape": {"enabled": True, "profiles": {"stable": {"steps": 32}}}}}
+            with patch("local3dai.workflow._run_hunyuan_shape", side_effect=fake_hunyuan_shape):
+                assets = generate_module_assets(root, {"modules": [module]}, allow_fallback=True, config=config, options=options)
+
+            self.assertEqual(calls["count"], 1)
+            self.assertFalse(assets["modules"][0].get("reused_existing_asset", False))
+
     def test_module_assets_flag_platform_mesh_that_is_not_low_slab(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3120,6 +3476,41 @@ class AutoSceneTest(unittest.TestCase):
             self.assertEqual(semantic["status"], "needs_review")
             codes = {flag["code"] for flag in semantic["flags"]}
             self.assertIn("platform_not_low_slab", codes)
+
+    def test_module_assets_accept_low_slab_with_extreme_aspect_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference = root / "modules" / "display_platform" / "reference.png"
+            reference.parent.mkdir(parents=True)
+            Image.new("RGB", (32, 32), (180, 180, 180)).save(reference)
+            module = {
+                "module_id": "display_platform",
+                "name": "low display platform",
+                "role": "supporting_object",
+                "category": "stage_prop",
+                "generate_3d": True,
+                "expected_real_world_size": {"width": 5.0, "depth": 4.0, "height": 0.25, "unit": "meters"},
+            }
+
+            def fake_hunyuan_shape(**kwargs: object) -> Path:
+                from local3dai.auto_scene import write_module_proxy_glb
+
+                output_model = Path(kwargs["output_model"])
+                write_module_proxy_glb(output_model, module)
+                write_manifest(Path(kwargs["metadata"]), {"backend": "fake_hunyuan", "mesh_sanity": {"status": "needs_review", "flags": ["extreme_bbox_aspect"]}})
+                return output_model
+
+            options = self._options(root)
+            options.dry_run = False
+            options.backend = None
+            config = {"models": {"hunyuan3d_2_1_shape": {"enabled": True, "default_profile": "stable", "profiles": {"stable": {"steps": 32}}}}}
+            with patch("local3dai.workflow._run_hunyuan_shape", side_effect=fake_hunyuan_shape):
+                assets = generate_module_assets(root, {"modules": [module]}, allow_fallback=True, config=config, options=options)
+
+            asset = assets["modules"][0]
+            self.assertEqual(asset["sanity"]["semantic_mesh_sanity"]["status"], "pass")
+            self.assertEqual(asset["sanity"]["status"], "pass")
+            self.assertEqual(assets["status"], "pass")
 
 
 if __name__ == "__main__":

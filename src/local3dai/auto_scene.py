@@ -361,20 +361,39 @@ def _call_dashscope_multimodal_json(
     except Exception as exc:  # pragma: no cover - optional dependency until installed
         raise RuntimeError("DashScope SDK is required for multimodal scene planning. Install dashscope.") from exc
     dashscope.base_http_api_url = "https://dashscope.aliyuncs.com/api/v1"
-    response = dashscope.MultiModalConversation.call(
-        api_key=api_key,
-        model=str(llm_cfg.get("model", QWEN_AGENT_SERVED_MODEL)),
-        messages=messages,
-        temperature=float(llm_cfg.get("temperature", 0.2)),
-        max_tokens=int(max_tokens or llm_cfg.get("max_tokens", 1600)),
-        timeout=int(llm_cfg.get("timeout_seconds", 90)),
-        enable_thinking=False,
-    )
-    status_code = getattr(response, "status_code", None)
-    if status_code is not None and int(status_code) >= 400:
-        code = getattr(response, "code", "")
-        message = getattr(response, "message", "")
-        raise RuntimeError(f"DashScope {purpose} failed: {status_code} {code} {message}")
+    retry_attempts = max(1, int(llm_cfg.get("retry_attempts", 3)))
+    response = None
+    last_error: Exception | None = None
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            response = dashscope.MultiModalConversation.call(
+                api_key=api_key,
+                model=str(llm_cfg.get("model", QWEN_AGENT_SERVED_MODEL)),
+                messages=messages,
+                temperature=float(llm_cfg.get("temperature", 0.2)),
+                max_tokens=int(max_tokens or llm_cfg.get("max_tokens", 1600)),
+                timeout=int(llm_cfg.get("timeout_seconds", 90)),
+                enable_thinking=False,
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is not None and int(status_code) >= 400:
+                code = getattr(response, "code", "")
+                message = getattr(response, "message", "")
+                transient = int(status_code) in {408, 409, 425, 429} or int(status_code) >= 500
+                error = RuntimeError(f"DashScope {purpose} failed: {status_code} {code} {message}")
+                if transient and attempt < retry_attempts:
+                    last_error = error
+                    time.sleep(min(8.0, 1.5 * attempt))
+                    continue
+                raise error
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retry_attempts:
+                raise
+            time.sleep(min(8.0, 1.5 * attempt))
+    if response is None:
+        raise RuntimeError(f"DashScope {purpose} failed after {retry_attempts} retries: {last_error}")
     text = _dashscope_response_text(response).strip()
     parsed = _extract_json(text)
     if parsed is None:
@@ -609,6 +628,7 @@ def _normalize_model_plan(plan: dict[str, Any], options: AutoSceneOptions) -> di
         or prompt_plan.get("base_prompt")
         or options.request
     )
+    concept_image_plan["concept_prompt"] = _concept_prompt_with_positive_constraints(concept_image_plan["concept_prompt"])
     concept_image_plan.pop("negative_prompt", None)
     concept_image_plan.setdefault("purpose", "planning-only model-generated concept; audited before module prompt generation")
     prompt_plan["render_prompt"] = str(prompt_plan.get("render_prompt") or auto_task.get("expanded_request") or concept_image_plan["concept_prompt"])
@@ -691,7 +711,7 @@ def _module_reference_prompt_few_shot_examples() -> list[dict[str, str]]:
         },
         {
             "bad": "side profile industrial arm in a workshop with props",
-            "good": "untextured matte white/gray 3D CAD clay model of a cableless collaborative robot arm, sealed cylindrical joints, clean shape reconstruction reference, strict single-object orthographic front view, front elevation, zero yaw pitch roll camera, centered on a pure solid light gray background, full object visible, all wiring hidden internally, smooth uninterrupted exterior, blank unlabeled surfaces, object-only catalog cutout",
+            "good": "untextured matte white/gray 3D CAD clay model of a cableless collaborative robot arm, sealed cylindrical joints, clean shape reconstruction reference, strict single-object orthographic front view, front elevation, zero yaw pitch roll camera, centered on a pure solid light gray background, full object visible, wide left-right frontal silhouette, base centered at bottom, shoulder joint centered above base, lower arm link angled up-left, elbow disk visible, upper arm link angled up-right, wrist and two-finger gripper visible near top center, all wiring hidden internally, smooth uninterrupted exterior, blank unlabeled surfaces, object-only catalog cutout",
             "reason": "The 3D generator needs a clean front-facing object reference.",
         },
         {
@@ -707,8 +727,72 @@ def _module_reference_prompt_few_shot_examples() -> list[dict[str, str]]:
     ]
 
 
+def _concept_prompt_with_positive_constraints(prompt: str) -> str:
+    text = " ".join(str(prompt).split())
+    if not text:
+        return text
+    text = re.sub(r"\bwhite\s+low-profile\s+electric\s+hypercar\b", "white low-profile unbranded concept electric supercar", text, flags=re.IGNORECASE)
+    text = re.sub(r"\belectric\s+hypercar\b", "unbranded concept electric supercar", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"with a completely smooth front hood\s*\([^)]*\)\s*and clean wheels",
+        "with a completely smooth unbranded front hood, uninterrupted white paint, and clean wheels",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"a robotic arm visible on the right side\s*\([^)]*\)",
+        "a blank unbranded smooth metal robotic arm visible on the right side with a clean unlabeled base",
+        text,
+        flags=re.IGNORECASE,
+    )
+    replacements = [
+        (r"blank unbranded front bumper free of any emblems or logos", "blank smooth front bumper with uninterrupted white paint"),
+        (r"completely smooth blank unbranded surfaces on its body free of any text or logos", "uninterrupted blank smooth white casing on its body"),
+        (r"\s*free of any emblems or logos", ""),
+        (r"\s*free of any text or logos", ""),
+        (r"\s*free of emblems or logos", ""),
+        (r"\s*free of text or logos", ""),
+        (r"absolutely blank unlabeled surfaces or logos", "blank unlabeled unbranded surfaces"),
+        (r"without any readable text or logos", "with abstract graphic patterns and blank unlabeled surfaces"),
+        (r"without readable text or logos", "with abstract graphic patterns and blank unlabeled surfaces"),
+        (r"absolutely no text labels, brand names, logos, or warning stickers", "blank unbranded smooth surfaces"),
+        (r"strictly no people", "empty showroom"),
+        (r"absolutely no exit signs, safety signage, or red lights on walls", "clean dark walls with neutral architectural lighting"),
+        (r"no readable text anywhere in the background", "background surfaces contain only abstract patterns and blank materials"),
+        (r"no readable text", "abstract unreadable graphic patterns"),
+        (r"no text", "blank unlabeled surfaces"),
+        (r"no logos", "unbranded clean surfaces"),
+        (r"no logo", "unbranded clean surfaces"),
+        (r"no badges", "smooth unbranded surfaces"),
+        (r"no badge", "smooth unbranded surfaces"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    positive_clauses: list[str] = []
+    kept: list[str] = []
+    for clause in text.split(","):
+        normalized = " ".join(clause.split())
+        if not normalized:
+            continue
+        lower = normalized.lower()
+        if any(term in lower for term in (" no ", " not ", "without ", "free of ", "remove ", "avoid ", "forbid", "forbidden", "exclude ")):
+            if any(term in lower for term in ("hood", "nose", "badge", "emblem", "logo", "brand")):
+                positive_clauses.append("smooth unbranded front hood with uninterrupted white paint")
+            if any(term in lower for term in ("text", "label", "sign", "sticker", "marking")):
+                positive_clauses.append("blank unlabeled surfaces and abstract unreadable graphics")
+            if any(term in lower for term in ("people", "person", "human")):
+                positive_clauses.append("empty showroom")
+            if any(term in lower for term in ("robot", "arm", "base")):
+                positive_clauses.append("blank unbranded smooth metal robotic arm and clean unlabeled base")
+            continue
+        kept.append(normalized)
+    return _dedupe_comma_clauses(", ".join(kept + positive_clauses))
+
+
 def _solid_background_reference_prompt(prompt: str) -> str:
-    base = _strip_module_reference_forbidden_content_conflicts(_strip_module_reference_view_conflicts(str(prompt)))
+    base = _strip_module_reference_forbidden_content_conflicts(
+        _strip_module_reference_negative_prompting(_strip_module_reference_view_conflicts(str(prompt)))
+    )
     lower = base.lower()
     if not any(token in lower for token in ("orthographic", "正交", "正交正视图")):
         base += (
@@ -729,6 +813,46 @@ def _solid_background_reference_prompt(prompt: str) -> str:
     if "object-only" not in lower and "single-object catalog cutout" not in lower:
         base += ", single-object catalog cutout on blank solid background, empty canvas around object"
     return base
+
+
+def _strip_module_reference_negative_prompting(prompt: str) -> str:
+    """Convert common negative-prompt clauses into positive reconstruction clauses."""
+    kept: list[str] = []
+    positive_clauses: list[str] = []
+    negative_terms = (
+        "no ",
+        "not ",
+        "without ",
+        "avoid ",
+        "forbid",
+        "forbidden",
+        "exclude ",
+        "remove ",
+        "absolutely no",
+        "strictly no",
+    )
+    for clause in str(prompt).split(","):
+        normalized = " ".join(clause.split())
+        if not normalized:
+            continue
+        lower = normalized.lower()
+        if any(term in lower for term in negative_terms):
+            if any(term in lower for term in ("text", "label", "word", "sign", "sticker")):
+                positive_clauses.append("blank unlabeled surfaces")
+            if any(term in lower for term in ("logo", "brand", "emblem", "badge")):
+                positive_clauses.append("unbranded clean surfaces")
+            if any(term in lower for term in ("wire", "cable", "hose", "harness")):
+                positive_clauses.append("cableless sealed body with internally hidden wiring")
+            if any(term in lower for term in ("side", "three-quarter", "3/4", "angled", "top", "rear", "back", "perspective")):
+                positive_clauses.append("strict orthographic front view")
+                positive_clauses.append("front elevation")
+                positive_clauses.append("object front plane parallel to image plane")
+            if any(term in lower for term in ("floor", "shadow", "reflection", "environment", "background")):
+                positive_clauses.append("pure solid light gray background")
+                positive_clauses.append("clean even studio lighting")
+            continue
+        kept.append(normalized)
+    return _dedupe_comma_clauses(", ".join(kept + positive_clauses))
 
 
 def _strip_module_reference_view_conflicts(prompt: str) -> str:
@@ -806,6 +930,12 @@ def _module_structural_identity_text(module: dict[str, Any]) -> str:
 def _is_mechanical_arm_module(module: dict[str, Any]) -> bool:
     text = _module_identity_text(module)
     return ("robotic" in text or "机械臂" in text or "industrial arm" in text or "robot arm" in text) and "arm" in text
+
+
+def _is_vehicle_module(module: dict[str, Any]) -> bool:
+    text = _module_identity_text(module)
+    vehicle_terms = ("vehicle", "car", "supercar", "concept car", "automobile", "汽车", "超跑", "车辆")
+    return any(term in text for term in vehicle_terms)
 
 
 def _is_platform_module(module: dict[str, Any]) -> bool:
@@ -891,6 +1021,22 @@ def _dedupe_comma_clauses(text: str) -> str:
 
 def _module_reference_prompt_with_safety(module: dict[str, Any], prompt: str) -> str:
     base = _dedupe_comma_clauses(_solid_background_reference_prompt(prompt))
+    if _is_vehicle_module(module):
+        base = re.sub(r"\belectric\s+hypercar\b", "unbranded concept electric sports car", base, flags=re.IGNORECASE)
+        base = re.sub(r"\bhypercar\b", "concept sports car", base, flags=re.IGNORECASE)
+        base = _append_unique_clauses(
+            base,
+            [
+                "unbranded concept vehicle design",
+                "front hood is one continuous smooth blank painted panel",
+                "nose center is uninterrupted plain body surface",
+                "single-piece smooth front body shell",
+                "symmetrical headlights and wheel openings",
+                "clean manufacturer-free concept car face",
+                "white clay CAD body with simple construction seams",
+                "large continuous hood surface for shape reconstruction",
+            ],
+        )
     if _is_mechanical_arm_module(module):
         base = re.sub(r"\bindustrial\s+robotic\s+arm\b", "cableless articulated robot arm CAD primitive", base, flags=re.IGNORECASE)
         base = re.sub(r"\bstandard\s+six-axis\s+industrial\s+robotic\s+arm\b", "simplified six-axis cableless articulated robot arm", base, flags=re.IGNORECASE)
@@ -909,6 +1055,20 @@ def _module_reference_prompt_with_safety(module: dict[str, Any], prompt: str) ->
                 "heavy circular base",
                 "visible cylindrical joints",
                 "angular lower arm and upper arm",
+                "wide left-right frontal silhouette",
+                "base centered at bottom",
+                "shoulder joint centered above base",
+                "lower arm link angled up-left",
+                "elbow disk visible",
+                "upper arm link angled up-right",
+                "wrist and two-finger gripper visible near top center",
+                "front-face circular joints visible as circles",
+                "joint centers spread left center and right across the image width",
+                "two diagonal arm links form a wide open chevron in the front plane",
+                "base bottom center, shoulder left of center, elbow high center, wrist right of center",
+                "flat diagram-like front elevation pose",
+                "clear articulated chain across image width",
+                "neutral forward-facing articulated pose",
                 "sealed-joint design",
                 "smooth uninterrupted exterior",
                 "generic unbranded clean abstract cobot CAD style",
@@ -917,6 +1077,8 @@ def _module_reference_prompt_with_safety(module: dict[str, Any], prompt: str) ->
             ],
         )
     if _is_platform_module(module):
+        base = re.sub(r"\boctagonal\b", "rectangular", base, flags=re.IGNORECASE)
+        base = re.sub(r"\boctagon\b", "rectangle", base, flags=re.IGNORECASE)
         base = re.sub(r"\bdisplay\s+platform\b", "low solid rectangular slab", base, flags=re.IGNORECASE)
         base = re.sub(r"\bdisplay\b", "rectangular slab", base, flags=re.IGNORECASE)
         base = re.sub(r"\bmatte\s+black\b", "smooth hard-surface neutral gray CAD", base, flags=re.IGNORECASE)
@@ -934,6 +1096,10 @@ def _module_reference_prompt_with_safety(module: dict[str, Any], prompt: str) ->
                 "planar flat faces",
                 "crisp straight 90-degree edges",
                 "solid continuous slab body",
+                "top face is one uninterrupted unmarked flat plane",
+                "all faces use plain uniform clay material",
+                "smooth mark-free geometric surface",
+                "pure geometry-only slab reference",
                 "strict orthographic front elevation",
                 "long low rectangular silhouette",
             ],
@@ -977,6 +1143,7 @@ def _module_reference_generation_prompt(module: dict[str, Any], prompt: str, *, 
         f"{' with role ' + module_role if module_role else ''}. "
         "Generate a new isolated single-object module reference image of that target module only. "
         "Preserve the module identity, approximate proportions, and design language from the concept image. "
+        "Use the concept image for identification only; the output pose follows the front-elevation reconstruction clauses below. "
         "Output a clean front-facing image-to-3D reconstruction reference: strict orthographic front elevation, "
         "object front plane parallel to the image plane, centered on a pure solid light gray background, "
         "blank unlabeled surfaces, object-only catalog cutout."
@@ -986,6 +1153,7 @@ def _module_reference_generation_prompt(module: dict[str, Any], prompt: str, *, 
 
 def _safe_review_revision_prompt(module: dict[str, Any], revised_prompt: str) -> str:
     revised = " ".join(str(revised_prompt).split())
+    revised = _strip_module_reference_negative_prompting(revised)
     if _is_mechanical_arm_module(module):
         forbidden = (
             "water",
@@ -1020,12 +1188,29 @@ def _safe_review_revision_prompt(module: dict[str, Any], revised_prompt: str) ->
                 "single-object catalog cutout on blank solid background, empty canvas around object"
             )
     if _is_platform_module(module):
-        risky = ("monitor", "television", "screen", "display panel", "frame", "bezel", "hollow", "empty center", "stand")
+        risky = (
+            "monitor",
+            "television",
+            "screen",
+            "display panel",
+            "frame",
+            "bezel",
+            "hollow",
+            "empty center",
+            "stand",
+            "octagonal",
+            "letter",
+            "word",
+            "typography",
+            "text",
+        )
         if any(term in revised.lower() for term in risky):
             return (
                 "A smooth hard-surface neutral gray CAD model of one-piece low rectangular cuboid slab, "
                 "single-layer undivided horizontal slab, flat top plane spans the full width, height about one tenth of total width, "
                 "short front face, planar flat faces, crisp straight 90-degree edges, solid continuous slab body, "
+                "top face is one uninterrupted unmarked flat plane, all faces use plain uniform clay material, "
+                "smooth mark-free geometric surface, pure geometry-only slab reference, "
                 "strict orthographic front elevation, long low rectangular silhouette, centered on pure solid light gray background, "
                 "untextured matte clay 3D CAD reconstruction input, sealed simplified surfaces, shape-first reference, "
                 "single-object catalog cutout on blank solid background, blank unlabeled surfaces"
@@ -1277,8 +1462,8 @@ def _write_codex_image2_handoff(
     lines = [
         "# Codex image2 Handoff",
         "",
-        "Use the Codex built-in image2/imagegen skill to create the requested image asset(s).",
-        "Do not use DashScope/Qwen image generation or a local fallback model for this handoff.",
+        "Create the requested image asset(s) with the configured image2 provider.",
+        "Manual runs may use the Codex built-in image2/imagegen skill; self-iteration runs may satisfy this file through the internal local_model image2 executor.",
         "Do not add a negative prompt. All constraints are already in the positive prompt.",
         "",
         f"- Request kind: `{request.get('kind') or request.get('type')}`",
@@ -1292,7 +1477,7 @@ def _write_codex_image2_handoff(
     lines.extend(["", "## Steps", ""])
     lines.extend(
         [
-            "1. Generate the image with Codex built-in image2/imagegen using the prompt below.",
+            "1. Generate the image with the configured image2 provider using the prompt below.",
             "2. If a source image is listed, use it as visual context/reference, not as the final render input.",
             "3. Save the selected generated image exactly to the listed output path.",
             "4. Or import the selected generated image with the command template below, then rerun the same Auto Scene workdir so the image can be returned to qwen3.7-plus for review.",
@@ -1411,8 +1596,11 @@ def _write_external_imagegen_request(
             "PYTHONPATH=src .venv/bin/python -m local3dai.cli auto-scene-import-latest-image2 "
             f"--request {request_path.expanduser().resolve()}"
         ),
+        "provider_policy": "configured_image2_provider_or_manual_codex_image2",
         "instructions": [
-            "Generate this image with the Codex imagegen/image2 skill, not a local model.",
+            "Generate or satisfy this image request with the configured image2 provider.",
+            "For manual Codex sessions, use the Codex imagegen/image2 skill.",
+            "For self-iteration sessions, the internal local_model image2 executor may generate and import the output.",
             "Use source_image as visual context when it is provided; generate a new isolated standalone module image matching the prompt.",
             "Import the selected generated image with import_command, latest_import_command, or copy it exactly to output_path.",
             "Then rerun this stage so the image can be returned to the multimodal agent for review.",
@@ -1591,6 +1779,8 @@ def review_concept_image(
         "rules": [
             "如果有可读文字、logo、人物、界面图标，必须 revise。",
             "如果用户要求的主要物体缺失，必须 revise。",
+            "如果需要 revised_concept_prompt，只写正向目标描述，例如 smooth unbranded hood、blank unlabeled surfaces、empty showroom、abstract unreadable graphics。",
+            "revised_concept_prompt 不要使用 no/not/without/remove/avoid/negative_prompt。",
             "返回 strict JSON only。",
         ],
     }
@@ -1928,6 +2118,132 @@ def _copy_codex_image2_result(source: Path, output_path: str) -> dict[str, str]:
     if not _valid_image(output):
         raise ValueError(f"Imported Codex image2 output is not a valid image: {output}")
     return {"source_image": str(source), "output_path": str(output)}
+
+
+def _local_model_image2_output_report_for_path(output: Path) -> dict[str, Any]:
+    output = Path(output).expanduser().resolve()
+    output_abs = _absolute_artifact_path(output)
+    sidecar_path = output.with_name("local_model_image2_generation.json")
+    sidecar = _read_manifest_or_empty(sidecar_path)
+    if sidecar:
+        generation = sidecar.get("generation") if isinstance(sidecar.get("generation"), dict) else {}
+        return {
+            "executor_report": str(sidecar.get("executor_report") or _absolute_artifact_path(sidecar_path)),
+            "provider": str(sidecar.get("provider") or "local_model"),
+            "attempt": sidecar.get("attempt", 0),
+            "mode": str(sidecar.get("mode") or ""),
+            "item": sidecar.get("item", {}) if isinstance(sidecar.get("item"), dict) else {},
+            "generation": generation,
+        }
+    candidate_reports: list[Path] = []
+    for parent in (output.parent, output.parent.parent if output.parent.parent != output.parent else None):
+        if parent is None:
+            continue
+        report_path = parent / "local_model_image2_executor_report.json"
+        if report_path not in candidate_reports:
+            candidate_reports.append(report_path)
+    for report_path in candidate_reports:
+        report = _read_manifest_or_empty(report_path)
+        for item in report.get("outputs", []) if isinstance(report.get("outputs"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            if _absolute_artifact_path(item.get("output", "")) != output_abs:
+                continue
+            generation = item.get("generation") if isinstance(item.get("generation"), dict) else {}
+            return {
+                "executor_report": _absolute_artifact_path(report_path),
+                "provider": str(report.get("provider") or "local_model"),
+                "attempt": report.get("attempt", 0),
+                "mode": str(report.get("mode") or ""),
+                "item": item,
+                "generation": generation,
+            }
+    return {}
+
+
+def _existing_image2_generation_metadata(
+    output: Path,
+    *,
+    prompt: str,
+    default_created_by: str,
+    default_image_source: str,
+    source_image: str = "",
+) -> dict[str, Any]:
+    local_report = _local_model_image2_output_report_for_path(output)
+    if local_report:
+        generation = dict(local_report.get("generation") or {})
+        generation.setdefault("created_by", "local_model_image2_reference_generation")
+        generation["image_source"] = "local_model_image2"
+        generation["path"] = _absolute_artifact_path(output)
+        generation.setdefault("prompt", prompt)
+        if source_image:
+            generation["source_image"] = source_image
+        generation["executor_report"] = local_report["executor_report"]
+        generation["executor_provider"] = local_report["provider"]
+        generation["executor_attempt"] = local_report["attempt"]
+        return generation
+    generation = {
+        "created_by": default_created_by,
+        "image_source": default_image_source,
+        "path": _absolute_artifact_path(output),
+        "prompt": prompt,
+    }
+    if source_image:
+        generation["source_image"] = source_image
+    return generation
+
+
+def _stamp_image2_request_fulfillment(
+    request_path: Path,
+    *,
+    source: str,
+    provider: str,
+    executor_report: dict[str, Any],
+) -> dict[str, Any]:
+    request_path = Path(request_path).expanduser().resolve()
+    report_path = request_path.with_name("local_model_image2_executor_report.json") if source == "local_model_image2_executor" else request_path.with_name("image2_executor_report.json")
+    request = _read_manifest_or_empty(request_path)
+    outputs_by_path = {
+        _absolute_artifact_path(item.get("output", "")): item
+        for item in executor_report.get("outputs", [])
+        if isinstance(item, dict) and item.get("output")
+    }
+    request["fulfilled_by_source"] = source
+    request["fulfilled_by_provider"] = provider
+    request["image2_executor_report"] = _absolute_artifact_path(report_path)
+    for item in _codex_image2_request_items(request):
+        output_path = _absolute_artifact_path(item.get("output_path") or item.get("output"))
+        generated = outputs_by_path.get(output_path, {})
+        item["fulfilled_by_source"] = source
+        item["fulfilled_by_provider"] = provider
+        item["image2_executor_report"] = request["image2_executor_report"]
+        if generated.get("generation"):
+            item["image2_generation"] = generated["generation"]
+        raw_item_request_path = str(item.get("request_path") or "").strip()
+        item_request_path = Path(raw_item_request_path).expanduser() if raw_item_request_path else None
+        if item_request_path is not None and item_request_path.exists() and item_request_path.resolve() != request_path:
+            item_request = _read_manifest_or_empty(item_request_path)
+            item_request["status"] = item.get("status") or request.get("status") or "fulfilled_by_codex_image2"
+            item_request["fulfilled_at"] = request.get("fulfilled_at", "")
+            item_request["fulfilled_output_path"] = item.get("fulfilled_output_path") or item.get("output_path") or item.get("output") or ""
+            item_request["imported_image"] = item.get("imported_image", "")
+            item_request["fulfilled_by_source"] = source
+            item_request["fulfilled_by_provider"] = provider
+            item_request["image2_executor_report"] = request["image2_executor_report"]
+            if generated.get("generation"):
+                item_request["image2_generation"] = generated["generation"]
+            item_request.setdefault("provider_policy", "configured_image2_provider_or_manual_codex_image2")
+            write_manifest(item_request_path, item_request)
+    write_manifest(request_path, request)
+
+    import_manifest_path = request_path.with_name("codex_image2_import.json")
+    import_manifest = _read_manifest_or_empty(import_manifest_path)
+    if import_manifest:
+        import_manifest["source"] = source
+        import_manifest["fulfilled_by_provider"] = provider
+        import_manifest["image2_executor_report"] = request["image2_executor_report"]
+        write_manifest(import_manifest_path, import_manifest)
+    return import_manifest
 
 
 def _codex_image2_request_items(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2635,9 +2951,18 @@ def _local_model_image2_sources_for_request(
     image_path: Path | None = None
     mappings: dict[str, Path] = {}
     outputs: list[dict[str, Any]] = []
+    previous_report = _read_manifest_or_empty(request_path.with_name("local_model_image2_executor_report.json"))
+    attempt = int(previous_report.get("attempt", 0)) + 1 if previous_report else 1
+    previous_dir = request_path.parent / "self_image2_previous_outputs" / time.strftime("%Y%m%d-%H%M%S")
     for index, item in enumerate(items, start=1):
         output = _image2_output_path_for_item(item)
-        item_seed = int(_image2_executor_config(config).get("seed", seed)) + index * 997
+        previous_output = ""
+        if _valid_image(output):
+            previous_dir.mkdir(parents=True, exist_ok=True)
+            previous_output_path = previous_dir / f"{_safe_view_file_stem(str(item.get('module_id') or item.get('view_id') or item.get('kind') or f'item_{index}'))}.png"
+            shutil.copy2(output, previous_output_path)
+            previous_output = _absolute_artifact_path(previous_output_path)
+        item_seed = int(_image2_executor_config(config).get("seed", seed)) + attempt * 100000 + index * 997
         if final_render or _request_item_is_final_render(item):
             generation = _local_model_generate_final_item(
                 config=config,
@@ -2656,15 +2981,31 @@ def _local_model_image2_sources_for_request(
             )
         keys = _codex_image2_request_keys(item)
         key = keys[0] if keys else f"item_{index}"
+        output_record = {
+            "key": key,
+            "kind": str(item.get("kind") or item.get("type") or ""),
+            "module_id": str(item.get("module_id") or ""),
+            "view_id": str(item.get("view_id") or ""),
+            "output": _absolute_artifact_path(output),
+            "previous_output": previous_output,
+            "generation": generation,
+        }
         outputs.append(
+            output_record
+        )
+        write_manifest(
+            output.with_name("local_model_image2_generation.json"),
             {
-                "key": key,
-                "kind": str(item.get("kind") or item.get("type") or ""),
-                "module_id": str(item.get("module_id") or ""),
-                "view_id": str(item.get("view_id") or ""),
+                "type": "local_model_image2_generation",
+                "provider": "local_model",
+                "request_path": _absolute_artifact_path(request_path),
+                "attempt": attempt,
+                "mode": "final_render" if final_render else "reference_image",
+                "item": output_record,
                 "output": _absolute_artifact_path(output),
                 "generation": generation,
-            }
+                "executor_report": _absolute_artifact_path(request_path.with_name("local_model_image2_executor_report.json")),
+            },
         )
         if len(items) == 1:
             image_path = output
@@ -2675,6 +3016,7 @@ def _local_model_image2_sources_for_request(
         "provider": "local_model",
         "status": "complete",
         "request_path": _absolute_artifact_path(request_path),
+        "attempt": attempt,
         "mode": "final_render" if final_render else "reference_image",
         "outputs": outputs,
     }
@@ -2797,6 +3139,12 @@ def execute_auto_scene_image2_request(
             )
             import_summary = import_codex_image2_result(request_path, image_path=image_path, image_mappings=mappings)
             import_summary["source"] = "local_model_image2_executor"
+            _stamp_image2_request_fulfillment(
+                request_path,
+                source="local_model_image2_executor",
+                provider=normalized,
+                executor_report=executor_report,
+            )
         elif normalized == "mock":
             if not allow_mock:
                 raise RuntimeError("Mock image2 provider is disabled. Pass allow_mock=True or use --allow-mock-image2 for smoke tests.")
@@ -3103,7 +3451,16 @@ def audit_auto_scene_image2_flow(
     concept_generation = _read_manifest_or_empty(concept_generation_path)
     concept_request = _read_manifest_or_empty(concept_image_path.with_name("imagegen_request.json"))
     concept_source = str(concept_generation.get("image_source") or concept_generation.get("created_by") or "")
-    codex_like_sources = {"imagegen_skill_external", "image2_provided", "codex_builtin_image2", "codex_generated_images_latest_scan"}
+    codex_like_sources = {
+        "imagegen_skill_external",
+        "image2_provided",
+        "codex_builtin_image2",
+        "codex_generated_images_latest_scan",
+        "local_model_image2",
+        "local_model_image2_executor",
+        "local_model_image2_reference_generation",
+        "local_model_image2_final_render",
+    }
     concept_codex_ok = _valid_image(concept_image_path) and (
         not require_codex_image2
         or concept_source in codex_like_sources
@@ -3120,7 +3477,7 @@ def audit_auto_scene_image2_flow(
             "image_source": concept_generation.get("image_source", ""),
             "request_provider": concept_request.get("provider", ""),
         },
-        reason="The concept image must be provided by Codex image2/imported image2, not a local/mock/DashScope image generator.",
+        reason="The concept image must be provided by a real configured image2 provider or imported image2 output, not mock/procedural/DashScope fallback generation.",
     )
     _audit_check(
         checks,
@@ -3189,7 +3546,7 @@ def audit_auto_scene_image2_flow(
         "module_reference_images_codex_image2",
         all_reference_ok,
         evidence={"modules": reference_results},
-        reason="Every module reference image must come from Codex image2/imported image2 and be valid before 3D generation.",
+        reason="Every module reference image must come from a real configured image2 provider or imported image2 output and be valid before 3D generation.",
     )
     _audit_check(
         checks,
@@ -3293,7 +3650,7 @@ def audit_auto_scene_image2_flow(
             "final_image2_uses_white_model_channels",
             all_white_locked,
             evidence={"final_request": _absolute_artifact_path(final_request_path), "requests": final_evidence},
-            reason="Final Codex image2 rendering must use the white-model RGB and edge channels as position-lock inputs.",
+            reason="Final image2 rendering must use the white-model RGB and edge channels as position-lock inputs.",
         )
         _audit_check(
             checks,
@@ -3358,7 +3715,8 @@ def generate_concept_image(
 ) -> Path:
     workdir = workdir.expanduser().resolve()
     output = workdir / str(concept_plan.get("output", "concept/global_concept.png"))
-    prompt = str(concept_plan.get("concept_prompt") or concept_plan.get("prompt") or "")
+    prompt = _concept_prompt_with_positive_constraints(str(concept_plan.get("concept_prompt") or concept_plan.get("prompt") or ""))
+    concept_plan["concept_prompt"] = prompt
     prompt_path = output.with_name("concept_prompt.txt")
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
@@ -3402,10 +3760,14 @@ def generate_concept_image(
                 height=int(concept_plan.get("height", 1024)),
             )
     else:
+        image_source = "imagegen_skill_external" if provider in {"external_imagegen", "imagegen", "imagegen_skill", "manual_image2"} else "image2_provided"
         generation = {
-            "created_by": "imagegen_skill_external" if provider in {"external_imagegen", "imagegen", "imagegen_skill", "manual_image2"} else "image2_provided",
-            "path": _absolute_artifact_path(output),
-            "prompt": prompt,
+            **_existing_image2_generation_metadata(
+                output,
+                prompt=prompt,
+                default_created_by=image_source,
+                default_image_source=image_source,
+            )
         }
     write_manifest(
         output.with_name("generation_manifest.json"),
@@ -3529,13 +3891,13 @@ def generate_module_references(
                 image_source = "dashscope_imagegen"
             else:
                 image_source = "image2_provided" if module_id not in force_module_ids else "image2_regenerated_existing"
-            generation = {
-                "created_by": image_source,
-                "image_source": image_source,
-                "path": _absolute_artifact_path(reference),
-                "prompt": prompt,
-                "source_image": _absolute_artifact_path(concept_source) if use_concept_source_image and concept_source else "",
-            }
+            generation = _existing_image2_generation_metadata(
+                reference,
+                prompt=prompt,
+                default_created_by=image_source,
+                default_image_source=image_source,
+                source_image=_absolute_artifact_path(concept_source) if use_concept_source_image and concept_source else "",
+            )
         elif should_mock:
             _draw_mock_scene(reference, kind="reference", seed=(abs(hash(module_id)) + index) % 9999, size=512)
             generation = {
@@ -3666,6 +4028,7 @@ def review_module_reference_images(
             "CAD/白模部件允许看到轻微圆柱厚度或关节厚度；合格图像整体保持正面平视、前平面平行图像平面、单正面展示。",
             "合格图像呈现 blank unlabeled surfaces、plain solid background、object-only catalog cutout、internally hidden wiring 和 clean even lighting。",
             "屏幕/显示面板模块的修订使用 panel/slab 语义：portrait vertical flat luminous panel、tall narrow rectangle、thin uniform bezel、wall-panel style exhibition display face。",
+            "平台、底座、纯几何 CAD 模块上的低对比材质纹理、压缩噪声、阴影或灰度污迹不等同于文字；只有清晰可读字符、标签、标牌才 revise。",
             "必须符合模块名称、角色和场景概念。",
             "如果失败，给出只含正向目标描述的 revised_reference_prompt 用于重新调用 image2；不输出 negative_prompt 字段。",
         ],
@@ -3696,6 +4059,20 @@ def review_module_reference_images(
     review.setdefault("backend", info["backend"])
     review.setdefault("failed_modules", [])
     review.setdefault("module_reviews", [])
+    modules_by_id = {
+        str(module.get("module_id") or ""): module
+        for module in module_plan.get("modules", [])
+        if isinstance(module, dict) and module.get("module_id")
+    }
+    for item in review.get("module_reviews", []):
+        if not isinstance(item, dict) or not item.get("revised_reference_prompt"):
+            continue
+        module_id = str(item.get("module_id") or "")
+        module = modules_by_id.get(module_id, {"module_id": module_id})
+        item["revised_reference_prompt"] = _module_reference_prompt_with_safety(
+            module,
+            _safe_review_revision_prompt(module, str(item["revised_reference_prompt"])),
+        )
     write_manifest(output_path, review)
     return review
 
@@ -3724,6 +4101,12 @@ def apply_module_review_revisions(module_plan: dict[str, Any], review: dict[str,
 
 
 def mark_module_reference_review_status(workdir: Path, review: dict[str, Any]) -> None:
+    module_plan = _read_manifest_or_empty(workdir / "modules" / "module_plan.json")
+    modules_by_id = {
+        str(module.get("module_id") or ""): module
+        for module in module_plan.get("modules", [])
+        if isinstance(module, dict) and module.get("module_id")
+    }
     for item in review.get("module_reviews", []):
         if not isinstance(item, dict):
             continue
@@ -3738,7 +4121,11 @@ def mark_module_reference_review_status(workdir: Path, review: dict[str, Any]) -
         manifest["review_attempt"] = review.get("attempt", 0)
         manifest["review_notes"] = str(item.get("notes", ""))
         if item.get("revised_reference_prompt"):
-            manifest["revised_reference_prompt"] = str(item["revised_reference_prompt"])
+            module = modules_by_id.get(module_id, {"module_id": module_id})
+            manifest["revised_reference_prompt"] = _module_reference_prompt_with_safety(
+                module,
+                _safe_review_revision_prompt(module, str(item["revised_reference_prompt"])),
+            )
         write_manifest(manifest_path, manifest)
 
 
@@ -4318,7 +4705,7 @@ def _module_semantic_mesh_sanity(module: dict[str, Any], model_path: Path, mesh_
                     "message": "Platform-like modules should have one thin axis relative to the broad top plane.",
                 }
             )
-        if face_fill_ratio < 0.42:
+        if face_fill_ratio < 0.38:
             flags.append(
                 {
                     "code": "platform_not_broad_enough",
@@ -4375,6 +4762,56 @@ def _merge_mesh_sanity_status(*statuses: str) -> str:
     return "pass"
 
 
+def _module_mesh_generator_status_for_merge(module: dict[str, Any], mesh_stats: dict[str, Any], semantic_sanity: dict[str, Any]) -> str:
+    status = str(mesh_stats.get("hunyuan_status") or "pass")
+    hunyuan_sanity = mesh_stats.get("hunyuan_mesh_sanity") if isinstance(mesh_stats.get("hunyuan_mesh_sanity"), dict) else {}
+    flags = {str(flag) for flag in hunyuan_sanity.get("flags", []) if flag}
+    semantic_profile = str(semantic_sanity.get("semantic_profile") or "")
+    if (
+        status in {"needs_review", "review", "warning"}
+        and flags
+        and flags.issubset({"extreme_bbox_aspect"})
+        and str(semantic_sanity.get("status") or "") == "pass"
+        and semantic_profile in {"low_horizontal_slab", "flat_panel", "flat_vertical_panel"}
+    ):
+        return "pass"
+    return status
+
+
+def _mesh_stats_from_existing_sanity(sanity: dict[str, Any]) -> dict[str, Any]:
+    hunyuan_mesh_sanity = sanity.get("hunyuan_mesh_sanity") if isinstance(sanity.get("hunyuan_mesh_sanity"), dict) else {}
+    return {
+        "vertices": int(sanity.get("vertices", 0) or 0),
+        "faces": int(sanity.get("faces", 0) or 0),
+        "mesh_bounds": sanity.get("mesh_bounds", {}),
+        "mesh_extents": sanity.get("mesh_extents", []),
+        "hunyuan_mesh_sanity": hunyuan_mesh_sanity,
+        "hunyuan_status": hunyuan_mesh_sanity.get("status", ""),
+    }
+
+
+def _refresh_reused_module_sanity(module: dict[str, Any], model_path: Path, sanity: dict[str, Any]) -> dict[str, Any]:
+    mesh_stats = _mesh_stats_from_existing_sanity(sanity)
+    semantic_sanity = _module_semantic_mesh_sanity(module, model_path, mesh_stats)
+    generator_status = _module_mesh_generator_status_for_merge(module, mesh_stats, semantic_sanity)
+    refreshed = dict(sanity)
+    refreshed["semantic_mesh_sanity"] = semantic_sanity
+    refreshed["status"] = _merge_mesh_sanity_status(generator_status, str(semantic_sanity.get("status") or "pass"))
+    return refreshed
+
+
+def _quality_issue_from_semantic_sanity(module_id: str, semantic_sanity: dict[str, Any]) -> dict[str, Any] | None:
+    if not semantic_sanity.get("flags"):
+        return None
+    return {
+        "module_id": module_id,
+        "status": semantic_sanity.get("status", "needs_review"),
+        "action": "review_or_regenerate_module_3d",
+        "semantic_profile": semantic_sanity.get("semantic_profile", ""),
+        "flags": semantic_sanity.get("flags", []),
+    }
+
+
 def _hunyuan_enabled(config: dict[str, Any] | None, options: AutoSceneOptions | None) -> bool:
     if config is None or options is None or options.dry_run or options.backend == "mock":
         return False
@@ -4382,7 +4819,16 @@ def _hunyuan_enabled(config: dict[str, Any] | None, options: AutoSceneOptions | 
     return bool(model.get("enabled", False))
 
 
-def _hunyuan_shape_profile(config: dict[str, Any], options: AutoSceneOptions | None) -> tuple[str, dict[str, Any]]:
+def _system_total_memory_gb() -> float:
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        pages = os.sysconf("SC_PHYS_PAGES")
+        return float(page_size * pages) / 1024**3
+    except (AttributeError, OSError, ValueError):
+        return 0.0
+
+
+def _hunyuan_shape_profile_candidates(config: dict[str, Any], options: AutoSceneOptions | None) -> list[tuple[str, dict[str, Any]]]:
     model = config.get("models", {}).get("hunyuan3d_2_1_shape", {})
     profiles = model.get("profiles", {}) if isinstance(model.get("profiles"), dict) else {}
     preferred_names = [
@@ -4391,11 +4837,178 @@ def _hunyuan_shape_profile(config: dict[str, Any], options: AutoSceneOptions | N
         str(options.quality_mode if options else "" or ""),
         "high",
         "balanced",
+        "stable",
     ]
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
     for name in preferred_names:
-        if name and isinstance(profiles.get(name), dict):
-            return name, dict(profiles[name])
-    return "", {}
+        if name and name not in seen and isinstance(profiles.get(name), dict):
+            candidates.append((name, dict(profiles[name])))
+            seen.add(name)
+    if not candidates:
+        return [("", {})]
+
+    total_memory_gb = _system_total_memory_gb()
+    safe_profile = str(model.get("memory_safe_profile") or "stable")
+    threshold_gb = float(model.get("memory_safe_profile_under_gb", 32.0))
+    if total_memory_gb and total_memory_gb < threshold_gb and safe_profile in profiles:
+        safe = [(name, overrides) for name, overrides in candidates if name == safe_profile]
+        rest = [(name, overrides) for name, overrides in candidates if name != safe_profile]
+        if safe:
+            return safe + rest
+    return candidates
+
+
+def _hunyuan_shape_profile(config: dict[str, Any], options: AutoSceneOptions | None) -> tuple[str, dict[str, Any]]:
+    return _hunyuan_shape_profile_candidates(config, options)[0]
+
+
+def _read_module_asset_manifest_for_reuse(
+    workdir: Path,
+    module_plan: dict[str, Any],
+    *,
+    allow_fallback: bool,
+    hunyuan_enabled: bool,
+    hero_model_path: Path | None = None,
+) -> dict[str, Any] | None:
+    manifest_path = workdir / "modules" / "module_asset_manifest.json"
+    manifest = _read_manifest_or_empty(manifest_path)
+    assets = [item for item in manifest.get("modules", []) if isinstance(item, dict)]
+    planned_modules = [item for item in module_plan.get("modules", []) if isinstance(item, dict)]
+    planned_ids = [str(item.get("module_id") or "") for item in planned_modules if item.get("module_id")]
+    assets_by_id = {str(item.get("module_id") or ""): item for item in assets if item.get("module_id")}
+    if not planned_ids or set(planned_ids) != set(assets_by_id):
+        return None
+
+    reused_assets: list[dict[str, Any]] = []
+    reused_quality_issues: list[dict[str, Any]] = []
+    for module in planned_modules:
+        module_id = str(module.get("module_id") or "")
+        asset = dict(assets_by_id.get(module_id) or {})
+        module_dir = workdir / "modules" / module_id
+        reference = module_dir / "reference.png"
+        reference_manifest = _read_manifest_or_empty(module_dir / "reference_manifest.json")
+        if not _valid_image(reference):
+            return None
+        review_status = str(reference_manifest.get("review_status") or "").lower()
+        if review_status and review_status != "pass":
+            return None
+
+        model_path = Path(str(asset.get("model_path") or module_dir / "model.glb")).expanduser()
+        metadata_path = Path(str(asset.get("metadata") or module_dir / "metadata.json")).expanduser()
+        sanity = asset.get("sanity") if isinstance(asset.get("sanity"), dict) else _read_manifest_or_empty(module_dir / "sanity.json")
+        metadata = _read_manifest_or_empty(metadata_path)
+        if not _valid_model_artifact(model_path) or not metadata:
+            return None
+        try:
+            if reference.stat().st_mtime > model_path.stat().st_mtime + 1.0:
+                return None
+        except OSError:
+            return None
+        source_reference = str(metadata.get("source_reference") or asset.get("reference_image") or "")
+        if _absolute_artifact_path(source_reference) != _absolute_artifact_path(reference):
+            return None
+
+        created_by = str(metadata.get("created_by") or sanity.get("proxy_geometry") or "")
+        fallback_used = bool(asset.get("fallback_used") or sanity.get("fallback_used"))
+        module_generates_3d = bool(module.get("generate_3d", True))
+        if module_generates_3d and hunyuan_enabled:
+            external_source = Path(hero_model_path).expanduser() if hero_model_path and module.get("role") == "hero_object" else None
+            external_allowed = bool(external_source and external_source.exists() and created_by == "external_hero_model_glb")
+            if not external_allowed and created_by != "hunyuan3d_2_1_shape_from_reviewed_reference":
+                return None
+            if fallback_used:
+                return None
+        elif module_generates_3d and not allow_fallback and fallback_used:
+            return None
+
+        asset["reference_image"] = _absolute_artifact_path(reference)
+        asset["preprocessed_image"] = _absolute_artifact_path(module_dir / "preprocessed.png")
+        asset["model_path"] = _absolute_artifact_path(model_path)
+        asset["metadata"] = _absolute_artifact_path(metadata_path)
+        sanity = _refresh_reused_module_sanity(module, model_path, sanity)
+        asset["sanity"] = sanity
+        asset["fallback_used"] = fallback_used
+        reused_assets.append(asset)
+        issue = _quality_issue_from_semantic_sanity(module_id, sanity.get("semantic_mesh_sanity", {}))
+        if issue:
+            reused_quality_issues.append(issue)
+
+    reused = dict(manifest)
+    reused["modules"] = reused_assets
+    reused["reused_existing_assets"] = True
+    reused["resume_source"] = _absolute_artifact_path(manifest_path)
+    reused.setdefault("failed_modules", [])
+    reused["quality_issues"] = reused_quality_issues
+    reused.setdefault("module_3d_backend", "hunyuan3d_2_1_shape" if hunyuan_enabled else "procedural_or_external")
+    reused.setdefault("allow_procedural_fallback", allow_fallback)
+    reused["status"] = "needs_review" if reused.get("failed_modules") or reused.get("quality_issues") else "pass"
+    return reused
+
+
+def _read_single_module_asset_for_reuse(
+    workdir: Path,
+    module: dict[str, Any],
+    *,
+    allow_fallback: bool,
+    hunyuan_enabled: bool,
+    hero_model_path: Path | None = None,
+) -> dict[str, Any] | None:
+    module_id = str(module.get("module_id") or "")
+    if not module_id:
+        return None
+    manifest = _read_manifest_or_empty(workdir / "modules" / "module_asset_manifest.json")
+    assets_by_id = {
+        str(item.get("module_id") or ""): item
+        for item in manifest.get("modules", [])
+        if isinstance(item, dict) and item.get("module_id")
+    }
+    asset = dict(assets_by_id.get(module_id) or {})
+    if not asset:
+        return None
+    module_dir = workdir / "modules" / module_id
+    reference = module_dir / "reference.png"
+    reference_manifest = _read_manifest_or_empty(module_dir / "reference_manifest.json")
+    if not _valid_image(reference):
+        return None
+    review_status = str(reference_manifest.get("review_status") or "").lower()
+    if review_status and review_status != "pass":
+        return None
+    model_path = Path(str(asset.get("model_path") or module_dir / "model.glb")).expanduser()
+    metadata_path = Path(str(asset.get("metadata") or module_dir / "metadata.json")).expanduser()
+    sanity = asset.get("sanity") if isinstance(asset.get("sanity"), dict) else _read_manifest_or_empty(module_dir / "sanity.json")
+    metadata = _read_manifest_or_empty(metadata_path)
+    if not _valid_model_artifact(model_path) or not metadata:
+        return None
+    try:
+        if reference.stat().st_mtime > model_path.stat().st_mtime + 1.0:
+            return None
+    except OSError:
+        return None
+    source_reference = str(metadata.get("source_reference") or asset.get("reference_image") or "")
+    if _absolute_artifact_path(source_reference) != _absolute_artifact_path(reference):
+        return None
+    created_by = str(metadata.get("created_by") or sanity.get("proxy_geometry") or "")
+    fallback_used = bool(asset.get("fallback_used") or sanity.get("fallback_used"))
+    module_generates_3d = bool(module.get("generate_3d", True))
+    if module_generates_3d and hunyuan_enabled:
+        external_source = Path(hero_model_path).expanduser() if hero_model_path and module.get("role") == "hero_object" else None
+        external_allowed = bool(external_source and external_source.exists() and created_by == "external_hero_model_glb")
+        if not external_allowed and created_by != "hunyuan3d_2_1_shape_from_reviewed_reference":
+            return None
+        if fallback_used:
+            return None
+    elif module_generates_3d and not allow_fallback and fallback_used:
+        return None
+    asset["reference_image"] = _absolute_artifact_path(reference)
+    asset["preprocessed_image"] = _absolute_artifact_path(module_dir / "preprocessed.png")
+    asset["model_path"] = _absolute_artifact_path(model_path)
+    asset["metadata"] = _absolute_artifact_path(metadata_path)
+    sanity = _refresh_reused_module_sanity(module, model_path, sanity)
+    asset["sanity"] = sanity
+    asset["fallback_used"] = fallback_used
+    asset["reused_existing_asset"] = True
+    return asset
 
 
 def _generate_module_hunyuan_asset(
@@ -4451,15 +5064,42 @@ def generate_module_assets(
     workdir = workdir.expanduser().resolve()
     assets: list[dict[str, Any]] = []
     hunyuan_enabled = _hunyuan_enabled(config, options)
-    hunyuan_profile_name, hunyuan_shape_overrides = _hunyuan_shape_profile(config or {}, options)
+    hunyuan_profiles = _hunyuan_shape_profile_candidates(config or {}, options)
+    reusable = _read_module_asset_manifest_for_reuse(
+        workdir,
+        module_plan,
+        allow_fallback=allow_fallback,
+        hunyuan_enabled=hunyuan_enabled,
+        hero_model_path=hero_model_path,
+    )
+    if reusable is not None:
+        return reusable
     failed_modules: list[dict[str, Any]] = []
     quality_issues: list[dict[str, Any]] = []
+    existing_manifest = _read_manifest_or_empty(workdir / "modules" / "module_asset_manifest.json")
+    existing_failed_modules = [
+        item for item in existing_manifest.get("failed_modules", []) if isinstance(item, dict)
+    ]
     for module in module_plan.get("modules", []):
         module_id = str(module["module_id"])
         module_dir = workdir / "modules" / module_id
         size = _module_size(module)
         model_path = module_dir / "model.glb"
         reference = module_dir / "reference.png"
+        single_reusable = _read_single_module_asset_for_reuse(
+            workdir,
+            module,
+            allow_fallback=allow_fallback,
+            hunyuan_enabled=hunyuan_enabled,
+            hero_model_path=hero_model_path,
+        )
+        if single_reusable is not None:
+            assets.append(single_reusable)
+            quality_issue = _quality_issue_from_semantic_sanity(module_id, single_reusable.get("sanity", {}).get("semantic_mesh_sanity", {}))
+            if quality_issue:
+                quality_issues.append(quality_issue)
+            failed_modules.extend(item for item in existing_failed_modules if str(item.get("module_id") or "") == module_id)
+            continue
         external_source = Path(hero_model_path).expanduser() if hero_model_path and module.get("role") == "hero_object" else None
         external_used = bool(external_source and external_source.exists())
         generator_id = ""
@@ -4481,24 +5121,61 @@ def generate_module_assets(
         else:
             mesh_stats = {}
             if hunyuan_enabled and module.get("generate_3d", True) and _valid_image(reference):
-                try:
-                    mesh_stats = _generate_module_hunyuan_asset(
-                        config=config or {},
-                        module=module,
-                        reference=reference,
-                        model_path=model_path,
-                        metadata_path=module_dir / "hunyuan_shape_metadata.json",
-                        seed=int((options.seed if options else 0) + len(assets) * 101),
-                        profile_name=hunyuan_profile_name,
-                        shape_overrides=hunyuan_shape_overrides,
+                hunyuan_attempts: list[dict[str, Any]] = []
+                last_hunyuan_error: Exception | None = None
+                for profile_index, (profile_name, shape_overrides) in enumerate(hunyuan_profiles, start=1):
+                    attempt_metadata = module_dir / (
+                        "hunyuan_shape_metadata.json" if profile_index == 1 else f"hunyuan_shape_metadata_{_safe_view_file_stem(profile_name or str(profile_index))}.json"
                     )
-                    generator_id = "hunyuan3d_2_1_shape_from_reviewed_reference"
-                except Exception as exc:
-                    generation_failure = str(exc)
+                    try:
+                        mesh_stats = _generate_module_hunyuan_asset(
+                            config=config or {},
+                            module=module,
+                            reference=reference,
+                            model_path=model_path,
+                            metadata_path=attempt_metadata,
+                            seed=int((options.seed if options else 0) + len(assets) * 101 + (profile_index - 1) * 17),
+                            profile_name=profile_name,
+                            shape_overrides=shape_overrides,
+                        )
+                        hunyuan_attempts.append(
+                            {
+                                "profile": profile_name,
+                                "status": "complete",
+                                "metadata": _absolute_artifact_path(attempt_metadata),
+                                "shape_overrides": shape_overrides,
+                            }
+                        )
+                        mesh_stats["hunyuan_attempts"] = hunyuan_attempts
+                        generator_id = "hunyuan3d_2_1_shape_from_reviewed_reference"
+                        break
+                    except Exception as exc:
+                        last_hunyuan_error = exc
+                        hunyuan_attempts.append(
+                            {
+                                "profile": profile_name,
+                                "status": "failed",
+                                "error": str(exc),
+                                "metadata": _absolute_artifact_path(attempt_metadata),
+                                "shape_overrides": shape_overrides,
+                            }
+                        )
+                        if model_path.exists():
+                            try:
+                                model_path.unlink()
+                            except OSError:
+                                pass
+                if not mesh_stats and last_hunyuan_error is not None:
+                    generation_failure = "; ".join(
+                        f"{item.get('profile') or 'default'}: {item.get('error')}"
+                        for item in hunyuan_attempts
+                        if item.get("status") == "failed"
+                    ) or str(last_hunyuan_error)
                     failure_policy = module_failure_policy(module, generation_failure, allow_fallback=allow_fallback)
+                    failure_policy["hunyuan_attempts"] = hunyuan_attempts
                     failed_modules.append(failure_policy)
                     if failure_policy["action"] == "fail_task":
-                        raise RuntimeError(f"Module {module_id} 3D AI generation failed: {generation_failure}") from exc
+                        raise RuntimeError(f"Module {module_id} 3D AI generation failed: {generation_failure}") from last_hunyuan_error
             if not mesh_stats:
                 if not allow_fallback and module.get("generate_3d", True):
                     raise RuntimeError(f"Module {module_id} did not produce a 3D AI mesh and procedural fallback is disabled.")
@@ -4506,17 +5183,11 @@ def generate_module_assets(
                 generator_id = "procedural_module_proxy_v3_axis_corrected"
                 fallback_used = bool(generation_failure)
         semantic_sanity = _module_semantic_mesh_sanity(module, model_path, mesh_stats)
-        sanity_status = _merge_mesh_sanity_status(str(mesh_stats.get("hunyuan_status") or "pass"), str(semantic_sanity.get("status") or "pass"))
-        if semantic_sanity.get("flags"):
-            quality_issues.append(
-                {
-                    "module_id": module_id,
-                    "status": semantic_sanity.get("status", "needs_review"),
-                    "action": "review_or_regenerate_module_3d",
-                    "semantic_profile": semantic_sanity.get("semantic_profile", ""),
-                    "flags": semantic_sanity.get("flags", []),
-                }
-            )
+        generator_status = _module_mesh_generator_status_for_merge(module, mesh_stats, semantic_sanity)
+        sanity_status = _merge_mesh_sanity_status(generator_status, str(semantic_sanity.get("status") or "pass"))
+        quality_issue = _quality_issue_from_semantic_sanity(module_id, semantic_sanity)
+        if quality_issue:
+            quality_issues.append(quality_issue)
         sanity = {
             "vertices": mesh_stats["vertices"],
             "faces": mesh_stats["faces"],
@@ -4546,6 +5217,8 @@ def generate_module_assets(
             sanity["hunyuan_profile"] = str(mesh_stats["hunyuan_profile"])
         if mesh_stats.get("hunyuan_shape_overrides"):
             sanity["hunyuan_shape_overrides"] = mesh_stats["hunyuan_shape_overrides"]
+        if mesh_stats.get("hunyuan_attempts"):
+            sanity["hunyuan_attempts"] = mesh_stats["hunyuan_attempts"]
         metadata = {
             "module_id": module_id,
             "category": module.get("category", ""),
@@ -4562,6 +5235,8 @@ def generate_module_assets(
             metadata["hunyuan_profile"] = str(mesh_stats["hunyuan_profile"])
         if mesh_stats.get("hunyuan_shape_overrides"):
             metadata["hunyuan_shape_overrides"] = mesh_stats["hunyuan_shape_overrides"]
+        if mesh_stats.get("hunyuan_attempts"):
+            metadata["hunyuan_attempts"] = mesh_stats["hunyuan_attempts"]
         write_manifest(module_dir / "metadata.json", metadata)
         write_manifest(module_dir / "sanity.json", sanity)
         assets.append(
@@ -5915,7 +6590,7 @@ def _synthesize_final_image2_request_from_position_contract(
         ),
         "instruction": (
             "This request was synthesized from the white-model render channels because the original final Codex image2 request was missing. "
-            "Use Codex built-in image2 with only the listed render-channel inputs, then import the selected output and rerun Auto Scene."
+            "Use the configured image2 provider with only the listed render-channel inputs, then import the selected output and rerun Auto Scene."
         ),
     }
     _write_codex_image2_handoff(handoff_path=handoff_path, request=request, batch_requests=requests)
@@ -6178,6 +6853,52 @@ def _final_position_retry_few_shot_examples() -> list[dict[str, str]]:
     ]
 
 
+def _position_contract_reuse_signature(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: contract.get(key)
+        for key in (
+            "view_id",
+            "status",
+            "bbox_norm",
+            "center_norm",
+            "size_norm",
+            "coverage_ratio",
+            "aspect_ratio",
+            "bbox_size_norm",
+        )
+        if key in contract
+    }
+
+
+def _fulfilled_final_image2_request_reusable(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
+    if existing.get("type") != "codex_image2_final_render_request":
+        return False
+    if existing.get("kind") != "final_render_batch":
+        return False
+    if str(existing.get("status") or "") != "fulfilled_by_codex_image2":
+        return False
+    existing_requests = [item for item in existing.get("requests", []) if isinstance(item, dict)]
+    desired_requests = [item for item in desired.get("requests", []) if isinstance(item, dict)]
+    if not desired_requests:
+        return False
+    existing_by_view = {str(item.get("view_id") or ""): item for item in existing_requests if item.get("view_id")}
+    for desired_item in desired_requests:
+        view_id = str(desired_item.get("view_id") or "")
+        existing_item = existing_by_view.get(view_id)
+        if not existing_item:
+            return False
+        output_path = Path(str(existing_item.get("output_path") or ""))
+        if not _valid_image(output_path):
+            return False
+        if str(existing_item.get("source_render_view_id") or "") != str(desired_item.get("source_render_view_id") or ""):
+            return False
+        existing_contract = existing_item.get("position_lock_contract") if isinstance(existing_item.get("position_lock_contract"), dict) else {}
+        desired_contract = desired_item.get("position_lock_contract") if isinstance(desired_item.get("position_lock_contract"), dict) else {}
+        if _position_contract_reuse_signature(existing_contract) != _position_contract_reuse_signature(desired_contract):
+            return False
+    return True
+
+
 def _write_codex_image2_final_request(
     *,
     workdir: Path,
@@ -6256,12 +6977,15 @@ def _write_codex_image2_final_request(
             f"--request {request_path.expanduser().resolve()}"
         ),
         "instruction": (
-            "Use Codex built-in image2, not DashScope/Qwen image2 and not a local AI renderer. "
+            "Use the configured image2 provider for final rendering; manual sessions may use Codex built-in image2. "
             "For each request, provide only the listed render-channel input images to image2; the white-model RGB is the primary position lock. "
             "Use prompt_plan.render_prompt for style and keep concept/module reference images out of final image inputs. "
             "Save each selected output exactly to output_path or import it with import_command/latest_import_command, then rerun the Auto Scene command."
         ),
     }
+    existing_request = _read_manifest_or_empty(request_path)
+    if _fulfilled_final_image2_request_reusable(existing_request, request):
+        return request_path
     _write_codex_image2_handoff(
         handoff_path=handoff_path,
         request=request,
@@ -6523,7 +7247,7 @@ def _collect_camera_retry_required_agent_summary(
         "multiview_contact_sheet": "",
         "agent_report": _absolute_artifact_path(ai_dir / "agent_report.json"),
         "decision_notes": [
-            "Final Codex image2 rendering was blocked because the Blender white-model contract still has edge-cropped camera framing.",
+            "Final image2 rendering was blocked because the Blender white-model contract still has edge-cropped camera framing.",
             "Rerun camera selection and white-model channel rendering before requesting final AI rendering.",
         ],
         "structure_scores": {},
@@ -6580,6 +7304,12 @@ def generate_codex_image2_final_render(
     ]
     if missing:
         _raise_external_imagegen_required(request_path)
+    if str(request.get("status") or "") == "awaiting_codex_image2":
+        request["status"] = "fulfilled_by_codex_image2"
+        request["fulfilled_by_source"] = "existing_final_outputs"
+        request["fulfilled_by_provider"] = "filesystem"
+        request["fulfilled_at"] = _image2_import_timestamp()
+        write_manifest(request_path, request)
     return _collect_codex_image2_final_summary(
         workdir=workdir,
         render_manifest_path=render_manifest_path,
@@ -7593,7 +8323,7 @@ def create_final_position_retry_plan(
             f"--request {retry_request_path.resolve()}"
         ),
         "instruction": (
-            "Use Codex built-in image2 with the same render-channel inputs and the stricter white-model position contract. "
+            "Use the configured image2 provider with the same render-channel inputs and the stricter white-model position contract. "
             "Import the corrected output, then rerun Auto Scene so the position lock report can validate it."
         ),
     }
@@ -7769,7 +8499,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     write_manifest(concept_review_path, concept_review)
     if str(concept_review.get("status", "")).lower() in {"revise", "needs_review", "failed", "fail"} and concept_review.get("revised_concept_prompt"):
         emit("concept", "Model requested concept prompt revision; regenerating concept image", 0.18)
-        concept_image_plan["concept_prompt"] = str(concept_review["revised_concept_prompt"])
+        concept_image_plan["concept_prompt"] = _concept_prompt_with_positive_constraints(str(concept_review["revised_concept_prompt"]))
         concept_plan_path = write_manifest(workdir / "concept" / "concept_image_plan.json", concept_image_plan)
         try:
             concept_image = tool_executor.run(
@@ -8448,7 +9178,7 @@ def run_auto_scene(options: AutoSceneOptions, progress: Progress | None = None) 
     summary["artifact_urls"]["stages"] = f"/api/file?path={stages_path}"
     summary_path = write_manifest(workdir / "auto_scene_summary.json", summary)
     if not options.dry_run and options.backend != "mock":
-        emit("package", "Auditing model-planned Codex image2 to reviewed 3D flow", 0.985)
+        emit("package", "Auditing model-planned image2 to reviewed 3D flow", 0.985)
         image2_flow_audit = tool_executor.run(
             "image2_flow_audit",
             {"workdir": str(workdir), "require_codex_image2": True, "require_hunyuan_3d": True},
